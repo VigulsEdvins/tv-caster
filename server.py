@@ -474,6 +474,7 @@ def adb_launch_tv_player(force=False):
     server_url = f"http://{LOCAL_IP}:{SERVER_PORT}/tv"
     try:
         subprocess.run([adb_bin, "connect", target], capture_output=True, timeout=8)
+        subprocess.run([adb_bin, "-s", target, "shell", "date", f"@{int(time.time())}"], capture_output=True, timeout=5)
         subprocess.run([adb_bin, "-s", target, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=5)
         subprocess.run(
             [
@@ -1150,13 +1151,20 @@ def extract_replay_lsm(url, translation_id=None, quality="720p"):
 
     translations = []
     raw_qualities_num = []
+    video_streams = {}
+    audio_streams = {}
+    curr_stream_inf = None
     for line in m3u8_text.splitlines():
-        if line.startswith('#EXT-X-MEDIA:TYPE=AUDIO'):
+        line_s = line.strip()
+        if line_s.startswith('#EXT-X-MEDIA:TYPE=AUDIO'):
             attrs = {}
-            for match in re.finditer(r'([A-Z0-9\-]+)=(?:\"([^\"]*)\"|([^,]*))', line):
+            for match in re.finditer(r'([A-Z0-9\-]+)=(?:\"([^\"]*)\"|([^,]*))', line_s):
                 attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
             lang = attrs.get('LANGUAGE', '').lower()
             name = attrs.get('NAME', '')
+            uri = attrs.get('URI', '')
+            if uri:
+                uri = uri if uri.startswith('http') else urllib.parse.urljoin(final_master_url, uri)
             t_id = lang or name
             if lang == 'lav':
                 t_name = 'Latviešu valoda'
@@ -1165,13 +1173,27 @@ def extract_replay_lsm(url, translation_id=None, quality="720p"):
             else:
                 t_name = name or 'Audio celiņš'
             if not any(tr['id'] == t_id for tr in translations):
-                translations.append({'id': t_id, 'title': t_name, 'lang': lang, 'name': name})
-        elif line.startswith('#EXT-X-STREAM-INF'):
-            m_res = re.search(r'RESOLUTION=\d+x(\d+)', line)
+                translations.append({'id': t_id, 'title': t_name, 'lang': lang, 'name': name, 'uri': uri})
+            if t_id and uri:
+                audio_streams[t_id] = uri
+                if lang:
+                    audio_streams[lang] = uri
+        elif line_s.startswith('#EXT-X-STREAM-INF'):
+            curr_stream_inf = line_s
+            m_res = re.search(r'RESOLUTION=\d+x(\d+)', line_s)
             if m_res:
                 q_int = int(m_res.group(1))
                 if q_int not in raw_qualities_num:
                     raw_qualities_num.append(q_int)
+        elif curr_stream_inf and not line_s.startswith('#') and line_s:
+            v_url = line_s if line_s.startswith('http') else urllib.parse.urljoin(final_master_url, line_s)
+            m_res = re.search(r'RESOLUTION=\d+x(\d+)', curr_stream_inf)
+            if m_res:
+                q_str = f"{m_res.group(1)}p"
+                video_streams[q_str] = v_url
+            if "default" not in video_streams:
+                video_streams["default"] = v_url
+            curr_stream_inf = None
 
     raw_qualities_num.sort(reverse=True)
     qualities = [f"{q}p" for q in raw_qualities_num]
@@ -1202,8 +1224,42 @@ def extract_replay_lsm(url, translation_id=None, quality="720p"):
         "raw_playlist": m3u8_text,
         "translations": translations,
         "qualities": qualities,
+        "video_streams": video_streams,
+        "audio_streams": audio_streams,
         "selected_translation": selected_translation,
     }
+
+def select_lsm_video_url(video_streams, quality="720p"):
+    if not video_streams:
+        return None
+    if quality in video_streams:
+        return video_streams[quality]
+    m = re.search(r'(\d+)', quality or '')
+    req_h = int(m.group(1)) if m else 720
+    parsed = []
+    for k, v in video_streams.items():
+        mk = re.search(r'(\d+)', k)
+        if mk:
+            parsed.append((int(mk.group(1)), v))
+    parsed.sort(key=lambda x: x[0], reverse=True)
+    for h, v in parsed:
+        if h <= req_h:
+            return v
+    if parsed:
+        return parsed[-1][1]
+    return list(video_streams.values())[0]
+
+def select_lsm_audio_url(audio_streams, chosen_lang=None):
+    if not audio_streams:
+        return None
+    if chosen_lang and chosen_lang in audio_streams:
+        return audio_streams[chosen_lang]
+    if chosen_lang:
+        low = chosen_lang.lower()
+        for k, v in audio_streams.items():
+            if k.lower() == low or low in k.lower():
+                return v
+    return list(audio_streams.values())[0]
 
 def generate_lsm_master_playlist(lsm_data, chosen_lang=None, chosen_quality=None):
     raw = lsm_data.get("raw_playlist", "")
@@ -1553,6 +1609,27 @@ def curl_fetch(url, headers=None, head_only=False, max_time=15):
         time.sleep(0.3)
     return ""
 
+def curl_fetch_bytes(url, headers=None, max_time=15):
+    h = headers or {"User-Agent": "Mozilla/5.0"}
+    parsed = urllib.parse.urlparse(url)
+    ip = get_clean_ip(parsed.hostname)
+    for _ in range(3):
+        cmd = ["curl", "-k", "-s", "--connect-timeout", "5", "--max-time", str(max_time)]
+        for k, v in h.items():
+            cmd.extend(["-H", f"{k}: {v}"])
+        if ip:
+            port = parsed.port or (443 if parsed.scheme == "https" or url.startswith("https") else 80)
+            cmd.extend(["--resolve", f"{parsed.hostname}:{port}:{ip}"])
+        cmd.append(url)
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=max_time + 2)
+            if p.returncode == 0 and len(p.stdout) > 0:
+                return p.stdout
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return b""
+
 def resolve_redirects(url, headers):
     curr = url
     for _ in range(6):
@@ -1729,6 +1806,230 @@ def download_and_stream_hls(session_id, title, hls_url, extra_headers=None, spee
         if not cast_triggered:
             tv_cast_url(local_stream_url, title)
 
+        if session_id == current_session_id:
+            app_state["status"] = "playing"
+            app_state["stage"] = "tv"
+            app_state["status_text"] = "Играет на ТВ"
+            app_state["download_progress"] = 100
+
+    except Exception as e:
+        session_info["active"] = False
+        set_error(session_id, e)
+
+def download_and_stream_lsm(session_id, title, video_url, audio_url=None, is_live=True, speed="1.0x", quality="720p"):
+    global app_state
+    session_info = active_sessions.get(session_id)
+    if not session_info:
+        return
+    cancel_event = session_info["cancel_event"]
+    session_file = session_info["file"]
+    session_info["active"] = True
+
+    try:
+        req_headers = {"User-Agent": "Mozilla/5.0"}
+        phase(session_id, "lsm streaming thread started")
+
+        if session_id == current_session_id:
+            app_state["status"] = "downloading"
+            app_state["stage"] = "download"
+            app_state["status_text"] = "Подготовка потока LSM"
+            app_state["title"] = title
+            app_state["download_progress"] = 0
+
+        cast_triggered = False
+        local_stream_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
+        shm_dir = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else CACHE_DIR
+
+        def parse_sub_playlist(m3u8_txt, base_url):
+            segs = []
+            seq = 0
+            has_end = "#EXT-X-ENDLIST" in m3u8_txt
+            for line in m3u8_txt.splitlines():
+                line_s = line.strip()
+                if line_s.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                    try:
+                        seq = int(line_s.split(":", 1)[1])
+                    except Exception:
+                        pass
+                elif line_s.startswith("#") or not line_s:
+                    continue
+                else:
+                    u = line_s if line_s.startswith("http") else urllib.parse.urljoin(base_url, line_s)
+                    m = re.search(r"startTime=(\d+)", u)
+                    key = m.group(1) if m else str(seq + len(segs))
+                    segs.append((key, u))
+            return segs, has_end
+
+        def mux_pair(seg_key, v_bytes, a_bytes):
+            if not v_bytes:
+                return b""
+            if not a_bytes:
+                return v_bytes
+            tmp_v = os.path.join(shm_dir, f"lsm_v_{session_id}_{seg_key}.ts")
+            tmp_a = os.path.join(shm_dir, f"lsm_a_{session_id}_{seg_key}.ts")
+            try:
+                with open(tmp_v, "wb") as fv:
+                    fv.write(v_bytes)
+                with open(tmp_a, "wb") as fa:
+                    fa.write(a_bytes)
+                ff = get_ffmpeg()
+                cmd = [ff, "-y", "-copyts", "-i", tmp_v, "-copyts", "-i", tmp_a, "-c", "copy", "-f", "mpegts", "pipe:1"]
+                proc = subprocess.run(cmd, capture_output=True, timeout=10)
+                if proc.returncode == 0 and len(proc.stdout) > 0:
+                    return proc.stdout
+            except Exception as e:
+                print("LSM mux error:", e)
+            finally:
+                for p in (tmp_v, tmp_a):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
+            return v_bytes
+
+        def fetch_pair(seg_key, v_u, a_u):
+            if cancel_event.is_set():
+                return b""
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                fut_v = ex.submit(curl_fetch_bytes, v_u, req_headers, 12)
+                fut_a = ex.submit(curl_fetch_bytes, a_u, req_headers, 12) if a_u else None
+                vb = fut_v.result()
+                ab = fut_a.result() if fut_a else None
+            return mux_pair(seg_key, vb, ab)
+
+        # Truncate / clean session file
+        with open(session_file, "wb"):
+            pass
+
+        processed_keys = set()
+        total_bytes = 0
+        buffered_count = 0
+        start_time = time.time()
+        consecutive_empty = 0
+
+        with open(session_file, "ab") as out_f:
+            v_body = curl_fetch(video_url, req_headers, max_time=8)
+            a_body = curl_fetch(audio_url, req_headers, max_time=8) if audio_url else ""
+            v_segs, v_has_end = parse_sub_playlist(v_body, video_url)
+            a_segs, _ = parse_sub_playlist(a_body, audio_url) if audio_url else ([], False)
+            a_dict = dict(a_segs)
+
+            is_live_stream = is_live and not v_has_end
+
+            # In live stream, grab the last 4 segments (~16s buffer)
+            # In VOD, start from segment 0
+            if is_live_stream and len(v_segs) > 4:
+                initial_v_segs = v_segs[-4:]
+            else:
+                initial_v_segs = v_segs
+
+            for k, vu in initial_v_segs:
+                if cancel_event.is_set():
+                    return
+                au = a_dict.get(k)
+                if not au and a_segs:
+                    idx = next((i for i, item in enumerate(v_segs) if item[0] == k), None)
+                    if idx is not None and idx < len(a_segs):
+                        au = a_segs[idx][1]
+                chunk = fetch_pair(k, vu, au)
+                if chunk:
+                    out_f.write(chunk)
+                    out_f.flush()
+                    total_bytes += len(chunk)
+                    buffered_count += 1
+                    processed_keys.add(k)
+
+                if buffered_count >= 2 and not cast_triggered and not cancel_event.is_set():
+                    cast_triggered = True
+                    if session_id == current_session_id:
+                        status_label = "Играет на ТВ (LSM Tiešraide)" if is_live_stream else "Играет на ТВ (LSM Replay)"
+                        app_state.update(status="playing", stage="tv", status_text=status_label)
+                    tv_cast_url(local_stream_url, title)
+
+            if not cast_triggered and buffered_count > 0 and not cancel_event.is_set():
+                cast_triggered = True
+                if session_id == current_session_id:
+                    status_label = "Играет на ТВ (LSM Tiešraide)" if is_live_stream else "Играет на ТВ (LSM Replay)"
+                    app_state.update(status="playing", stage="tv", status_text=status_label)
+                tv_cast_url(local_stream_url, title)
+
+            while not cancel_event.is_set():
+                if not is_live_stream:
+                    remaining = [(k, vu) for k, vu in v_segs if k not in processed_keys]
+                    if not remaining:
+                        break
+                    for k, vu in remaining:
+                        if cancel_event.is_set():
+                            return
+                        au = a_dict.get(k)
+                        if not au and a_segs:
+                            idx = next((i for i, item in enumerate(v_segs) if item[0] == k), None)
+                            if idx is not None and idx < len(a_segs):
+                                au = a_segs[idx][1]
+                        chunk = fetch_pair(k, vu, au)
+                        if chunk:
+                            out_f.write(chunk)
+                            out_f.flush()
+                            total_bytes += len(chunk)
+                            buffered_count += 1
+                            processed_keys.add(k)
+                            dur = time.time() - start_time
+                            spd = (total_bytes / (1024 * 1024)) / dur if dur > 0 else 0
+                            pct = int((len(processed_keys) / max(1, len(v_segs))) * 100)
+                            if session_id == current_session_id:
+                                app_state["download_progress"] = pct
+                                app_state["download_speed"] = f"{spd:.1f} MB/s"
+                                app_state["total_size"] = f"{total_bytes / (1024 * 1024):.1f} MB"
+                    break
+
+                time.sleep(2.5)
+                if cancel_event.is_set():
+                    break
+
+                try:
+                    v_body = curl_fetch(video_url, req_headers, max_time=6)
+                    a_body = curl_fetch(audio_url, req_headers, max_time=6) if audio_url else ""
+                    v_segs, v_has_end = parse_sub_playlist(v_body, video_url)
+                    a_segs, _ = parse_sub_playlist(a_body, audio_url) if audio_url else ([], False)
+                    a_dict = dict(a_segs)
+                except Exception:
+                    consecutive_empty += 1
+                    if consecutive_empty > 10:
+                        break
+                    continue
+
+                new_segs = [(k, vu) for k, vu in v_segs if k not in processed_keys]
+                if not new_segs:
+                    consecutive_empty += 1
+                    if consecutive_empty > 20 and v_has_end:
+                        break
+                    continue
+
+                consecutive_empty = 0
+                for k, vu in new_segs:
+                    if cancel_event.is_set():
+                        return
+                    au = a_dict.get(k)
+                    if not au and a_segs:
+                        idx = next((i for i, item in enumerate(v_segs) if item[0] == k), None)
+                        if idx is not None and idx < len(a_segs):
+                            au = a_segs[idx][1]
+                    chunk = fetch_pair(k, vu, au)
+                    if chunk:
+                        out_f.write(chunk)
+                        out_f.flush()
+                        total_bytes += len(chunk)
+                        buffered_count += 1
+                        processed_keys.add(k)
+
+                dur = time.time() - start_time
+                spd = (total_bytes / (1024 * 1024)) / dur if dur > 0 else 0
+                if session_id == current_session_id:
+                    app_state["download_speed"] = f"{spd:.1f} MB/s"
+                    app_state["total_size"] = f"{total_bytes / (1024 * 1024):.1f} MB"
+
+        session_info["active"] = False
         if session_id == current_session_id:
             app_state["status"] = "playing"
             app_state["stage"] = "tv"
@@ -2500,11 +2801,15 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                 "fetched_at": time.time(),
             }
 
-            stream_url = f"http://{LOCAL_IP}:{SERVER_PORT}/lsm/master.m3u8?s={session_id}&t={int(time.time())}&lang={chosen_tr or ''}&q={quality}"
-            tv_cast_url(stream_url, title)
-            info["active"] = False
-            status_text = "Играет на ТВ (LSM Tiešraide)" if data.get("is_live") else "Играет на ТВ (LSM Replay)"
-            app_state.update(status="playing", stage="tv", status_text=status_text, title=title)
+            v_url = select_lsm_video_url(data.get("video_streams", {}), quality) or data.get("final_master_url") or data.get("master_hls_url")
+            a_url = select_lsm_audio_url(data.get("audio_streams", {}), chosen_tr)
+            is_live = data.get("is_live", True)
+
+            threading.Thread(
+                target=download_and_stream_lsm,
+                args=(session_id, title, v_url, a_url, is_live, speed, quality),
+                daemon=True,
+            ).start()
         else:
             is_youtube = bool(re.search(r'(youtube\.com|youtu\.be)/', url))
             q_val = quality.replace("p", "") if quality else "720"
