@@ -156,24 +156,21 @@ body.native-bridge #tv-video {
   position: fixed;
   top: 50%;
   left: 50%;
-  transform: translate(-50%, -50%) scale(0.9);
+  transform: translate(-50%, -50%);
   z-index: 25;
-  background: rgba(15, 23, 42, 0.9);
-  border: 1px solid rgba(56, 189, 248, 0.4);
-  padding: 18px 34px;
-  border-radius: 20px;
-  font-size: 1.6rem;
+  background: rgba(11, 17, 32, 0.96);
+  border: 2px solid rgba(56, 189, 248, 0.55);
+  padding: 16px 30px;
+  border-radius: 16px;
+  font-size: 1.5rem;
   font-weight: 700;
   color: var(--text);
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
-  opacity: 0;
+  display: none;
   pointer-events: none;
-  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
 .action-toast.visible {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
+  display: block;
 }
 
 /* Main Player Overlay Bar (Supports Bottom or Top docking) */
@@ -182,16 +179,13 @@ body.native-bridge #tv-video {
   left: 3vw;
   right: 3vw;
   z-index: 20;
-  background: var(--panel-bg);
-  backdrop-filter: blur(20px);
+  background: rgba(11, 17, 32, 0.95);
   border: 1px solid var(--panel-border);
-  border-radius: 18px;
+  border-radius: 16px;
   padding: 14px 18px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
   display: flex;
   flex-direction: column;
   gap: 10px;
-  transition: opacity 0.3s ease, transform 0.3s ease;
 }
 
 .tv-overlay.dock-bottom {
@@ -205,13 +199,7 @@ body.native-bridge #tv-video {
 }
 
 .tv-overlay.hidden {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(20px);
-}
-
-.tv-overlay.dock-top.hidden {
-  transform: translateY(-20px);
+  display: none;
 }
 
 /* Header row inside overlay: Title + badges */
@@ -268,7 +256,6 @@ body.native-bridge #tv-video {
   padding: 6px 10px;
   border-radius: 12px;
   border: 2px solid transparent;
-  transition: all 0.18s ease;
   cursor: pointer;
 }
 
@@ -276,8 +263,7 @@ body.native-bridge #tv-video {
 .timeline-row:focus {
   outline: none;
   border-color: var(--primary);
-  background: rgba(56, 189, 248, 0.12);
-  box-shadow: 0 0 20px var(--primary-glow);
+  background: rgba(56, 189, 248, 0.16);
 }
 
 .time-label {
@@ -354,7 +340,7 @@ body.native-bridge #tv-video {
 .tv-btn {
   appearance: none;
   border: 2px solid rgba(255, 255, 255, 0.14);
-  background: rgba(30, 41, 59, 0.88);
+  background: #1e293b;
   color: var(--text);
   padding: 7px 11px;
   border-radius: 10px;
@@ -364,7 +350,6 @@ body.native-bridge #tv-video {
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
   white-space: nowrap;
 }
 
@@ -385,15 +370,19 @@ body.native-bridge #tv-video {
 .tv-btn:focus {
   outline: none;
   border-color: var(--primary);
-  background: rgba(56, 189, 248, 0.24);
-  transform: scale(1.05);
-  box-shadow: 0 0 18px var(--primary-glow);
+  background: #0369a1;
+  color: #fff;
   z-index: 2;
 }
 
+.tv-btn.focused .btn-sub {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
 .tv-btn.primary-play {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.32), rgba(129, 140, 248, 0.32));
-  border-color: rgba(56, 189, 248, 0.45);
+  background: #1d4ed8;
+  border-color: rgba(56, 189, 248, 0.55);
   padding: 7px 14px;
 }
 
@@ -402,33 +391,27 @@ body.native-bridge #tv-video {
   position: fixed;
   inset: 0;
   z-index: 30;
-  background: rgba(6, 9, 19, 0.72);
-  backdrop-filter: blur(8px);
-  display: flex;
+  background: rgba(6, 9, 19, 0.84);
+  display: none;
   align-items: center;
   justify-content: center;
   padding: var(--safe-y) var(--safe-x);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.22s ease;
 }
 
 .tv-modal-backdrop.open {
-  opacity: 1;
-  pointer-events: auto;
+  display: flex;
 }
 
 .tv-modal {
   width: min(920px, 88vw);
   max-height: 82vh;
-  background: rgba(15, 23, 42, 0.96);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  border-radius: 24px;
-  padding: 28px 32px;
-  box-shadow: 0 25px 70px rgba(0, 0, 0, 0.85);
+  background: #0f172a;
+  border: 2px solid rgba(56, 189, 248, 0.45);
+  border-radius: 20px;
+  padding: 24px 28px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
 }
 
 .modal-header {
@@ -475,12 +458,12 @@ body.native-bridge #tv-video {
 
 .modal-option-btn {
   appearance: none;
-  border: 2px solid rgba(255, 255, 255, 0.12);
-  background: rgba(30, 41, 59, 0.9);
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  background: #1e293b;
   color: var(--text);
-  padding: 14px 18px;
-  border-radius: 14px;
-  font-size: 1.05rem;
+  padding: 13px 16px;
+  border-radius: 12px;
+  font-size: 1.02rem;
   font-weight: 600;
   text-align: left;
   display: flex;
@@ -488,12 +471,11 @@ body.native-bridge #tv-video {
   align-items: center;
   gap: 10px;
   cursor: pointer;
-  transition: all 0.15s ease;
 }
 
 .modal-option-btn.active {
   border-color: var(--success);
-  background: rgba(52, 211, 153, 0.15);
+  background: rgba(52, 211, 153, 0.18);
   color: var(--success);
 }
 
@@ -501,8 +483,6 @@ body.native-bridge #tv-video {
 .modal-option-btn:focus {
   outline: none;
   border-color: var(--primary);
-  background: rgba(56, 189, 248, 0.25);
+  background: #0369a1;
   color: #fff;
-  transform: scale(1.04);
-  box-shadow: 0 0 20px var(--primary-glow);
 }

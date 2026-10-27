@@ -86,6 +86,13 @@
   let modalZone = "grid"; // "tabs" or "grid"
   let modalTabIndex = 0;
   let modalGridIndex = 0;
+  let cachedModalTabs = [];
+  let cachedModalBtns = [];
+  let cachedModalCols = 3;
+
+  const row0Els = [document.getElementById("btn-dock")];
+  const row1Els = [document.getElementById("timeline-scrubber")];
+  const row2Els = Array.from(document.querySelectorAll('#tv-overlay .focusable[data-row="2"]'));
 
   function applyDockPosition() {
     if (dockPosition === "top") {
@@ -144,12 +151,16 @@
 
   function setFocus(el) {
     if (!el) return;
-    document.querySelectorAll(".focused").forEach((node) => node.classList.remove("focused"));
+    if (focusedEl && focusedEl !== el) {
+      focusedEl.classList.remove("focused");
+    }
     focusedEl = el;
     el.classList.add("focused");
-    try {
-      el.scrollIntoView({ block: "nearest", inline: "nearest" });
-    } catch (_) {}
+    if (modalOpen && cachedModalBtns.length > 9) {
+      try {
+        el.scrollIntoView({ block: "nearest" });
+      } catch (_) {}
+    }
   }
 
   // Player Adapter (works with Native AndroidBridge OR HTML5 Video)
@@ -592,12 +603,18 @@
     }
 
     // Focus active option or first option inside modal
-    const gridBtns = Array.from(modalOptionsGrid.querySelectorAll(".modal-option-btn"));
-    if (gridBtns.length) {
+    cachedModalTabs = Array.from(modalSeasonTabs.querySelectorAll(".modal-tab"));
+    cachedModalBtns = Array.from(modalOptionsGrid.querySelectorAll(".modal-option-btn"));
+    if (cachedModalBtns.length) {
       modalZone = "grid";
-      const activeIdx = gridBtns.findIndex((b) => b.classList.contains("active"));
+      const activeIdx = cachedModalBtns.findIndex((b) => b.classList.contains("active"));
       modalGridIndex = activeIdx >= 0 ? activeIdx : 0;
-      setFocus(gridBtns[modalGridIndex]);
+      setFocus(cachedModalBtns[modalGridIndex]);
+      requestAnimationFrame(() => {
+        if (cachedModalBtns[0]) {
+          cachedModalCols = Math.max(1, Math.round(modalOptionsGrid.clientWidth / (cachedModalBtns[0].offsetWidth || 220)));
+        }
+      });
     }
   }
 
@@ -607,6 +624,9 @@
     btn.innerHTML = `<span>${msg}</span><span>Закрыть</span>`;
     btn.onclick = closeModal;
     modalOptionsGrid.appendChild(btn);
+    cachedModalTabs = [];
+    cachedModalBtns = [btn];
+    cachedModalCols = 1;
     modalZone = "grid";
     modalGridIndex = 0;
     setFocus(btn);
@@ -695,8 +715,8 @@
         closeModal();
         return;
       }
-      const tabs = Array.from(modalSeasonTabs.querySelectorAll(".modal-tab"));
-      const gridBtns = Array.from(modalOptionsGrid.querySelectorAll(".modal-option-btn"));
+      const tabs = cachedModalTabs;
+      const gridBtns = cachedModalBtns;
 
       if (dir === "ENTER") {
         if (focusedEl) focusedEl.click();
@@ -718,7 +738,7 @@
       }
 
       if (gridBtns.length) {
-        const cols = Math.max(1, Math.round(modalOptionsGrid.clientWidth / (gridBtns[0].offsetWidth || 220)));
+        const cols = cachedModalCols || 3;
         if (dir === "LEFT") {
           modalGridIndex = Math.max(0, modalGridIndex - 1);
           setFocus(gridBtns[modalGridIndex]);
@@ -752,7 +772,7 @@
         playerSeekRelative(15);
       } else if (dir === "ENTER" || dir === "UP" || dir === "DOWN") {
         showOverlay();
-        setFocus(document.getElementById("btn-play"));
+        setFocus(row2Els[0]);
       }
       return;
     }
@@ -766,9 +786,6 @@
     }
 
     const row = Number((focusedEl && focusedEl.getAttribute("data-row")) || 2);
-    const row0 = [document.getElementById("btn-dock")];
-    const row1 = [document.getElementById("timeline-scrubber")];
-    const row2 = Array.from(document.querySelectorAll('#tv-overlay .focusable[data-row="2"]'));
 
     if (dir === "ENTER") {
       if (focusedEl) focusedEl.click();
@@ -782,28 +799,28 @@
       } else if (dir === "RIGHT") {
         playerSeekRelative(15);
       } else if (dir === "UP") {
-        setFocus(row0[0]);
+        setFocus(row0Els[0]);
       } else if (dir === "DOWN") {
-        setFocus(row2[0]);
+        setFocus(row2Els[0]);
       }
       return;
     }
 
     if (row === 0) {
       if (dir === "DOWN") {
-        setFocus(row1[0]);
+        setFocus(row1Els[0]);
       }
       return;
     }
 
     if (row === 2) {
-      const idx = Math.max(0, row2.indexOf(focusedEl));
+      const idx = Math.max(0, row2Els.indexOf(focusedEl));
       if (dir === "LEFT") {
-        setFocus(row2[Math.max(0, idx - 1)]);
+        setFocus(row2Els[Math.max(0, idx - 1)]);
       } else if (dir === "RIGHT") {
-        setFocus(row2[Math.min(row2.length - 1, idx + 1)]);
+        setFocus(row2Els[Math.min(row2Els.length - 1, idx + 1)]);
       } else if (dir === "UP") {
-        setFocus(row1[0]);
+        setFocus(row1Els[0]);
       }
     }
   }
@@ -834,7 +851,7 @@
         duration: Math.floor(dur),
       }),
     }).catch(() => {});
-  }, 1500);
+  }, 2500);
 
   // Connect to Server SSE + Fallback Polling
   function startStateSync() {
@@ -843,8 +860,15 @@
       .then(applyServerState)
       .catch(() => {});
 
+    let sseConnected = false;
     if (window.EventSource) {
       const es = new EventSource("/api/tv/events");
+      es.onopen = () => {
+        sseConnected = true;
+      };
+      es.onerror = () => {
+        sseConnected = false;
+      };
       es.onmessage = (ev) => {
         try {
           applyServerState(JSON.parse(ev.data));
@@ -853,11 +877,12 @@
     }
 
     setInterval(() => {
+      if (sseConnected) return;
       fetch("/api/tv/state")
         .then((r) => r.json())
         .then(applyServerState)
         .catch(() => {});
-    }, 2500);
+    }, 5000);
   }
 
   setFocus(document.getElementById("btn-play"));

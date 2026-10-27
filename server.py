@@ -2367,6 +2367,20 @@ def build_tv_state_payload():
         probed = probe_duration(path=info.get("file") or CURRENT_FILE)
         tv_player_state["duration"] = probed if 0 < probed < 43200 else 0.0
         dur = tv_player_state["duration"]
+    raw_seasons = cached.get("seasons", [])
+    compact_seasons = [
+        {
+            "id": s.get("id"),
+            "title": s.get("title"),
+            "episodes": [{"id": e.get("id"), "title": e.get("title")} for e in (s.get("episodes") or [])],
+        }
+        for s in raw_seasons
+    ]
+    top_translations = cached.get("translations", [])
+    if not top_translations and raw_seasons:
+        first_eps = raw_seasons[0].get("episodes") or []
+        if first_eps:
+            top_translations = first_eps[0].get("translations") or []
     return {
         "status": app_state.get("status", "idle"),
         "stage": app_state.get("stage", "extract"),
@@ -2386,8 +2400,8 @@ def build_tv_state_payload():
         "duration": dur,
         "volume": int(tv_player_state.get("volume", 80)),
         "episode": app_state.get("episode"),
-        "seasons": cached.get("seasons", []),
-        "translations": cached.get("translations", []),
+        "seasons": compact_seasons,
+        "translations": top_translations,
         "qualities": cached.get("qualities", ["1080p", "720p", "480p", "360p"]),
         "speeds": cached.get("speeds", ["0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]),
         "audio_tracks": app_state.get("audio_tracks", []),
@@ -2950,7 +2964,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 with _tv_event_cond:
-                    _tv_event_cond.wait(timeout=1.5)
+                    _tv_event_cond.wait(timeout=3.5)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
