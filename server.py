@@ -422,27 +422,115 @@ def soap_call(service, action, body_xml):
         _note_tv_failure()
         return str(e)
 
+tv_player_state = {
+    "stream_url": "",
+    "title": "No media playing",
+    "session_id": 0,
+    "state": "STOPPED",       # PLAYING, PAUSED_PLAYBACK, STOPPED
+    "position": 0.0,          # seconds
+    "duration": 0.0,          # seconds
+    "volume": 80,
+    "last_report_at": 0.0,
+    "command_seq": 0,
+    "last_command": {"seq": 0, "type": "none", "target": None},
+    "use_custom_player": True,
+}
+_inspect_cache = {}
+_tv_event_cond = threading.Condition()
+
+def _issue_tv_command(cmd_type, target=None):
+    with _tv_event_cond:
+        seq = tv_player_state["command_seq"] + 1
+        tv_player_state["command_seq"] = seq
+        tv_player_state["last_command"] = {
+            "seq": seq,
+            "type": cmd_type,
+            "target": target,
+            "ts": time.time(),
+        }
+        _tv_event_cond.notify_all()
+
+def _notify_tv_listeners():
+    with _tv_event_cond:
+        _tv_event_cond.notify_all()
+
+def adb_launch_tv_player():
+    """If adb is installed and connected to TV['ip'], wake screen and bring TV Caster Player to foreground."""
+    adb_bin = shutil.which("adb")
+    if not adb_bin:
+        return
+    tv_ip = TV.get("ip") or TV_IP
+    target = f"{tv_ip}:5555"
+    try:
+        subprocess.run([adb_bin, "connect", target], capture_output=True, timeout=3)
+        subprocess.run([adb_bin, "-s", target, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=2)
+        subprocess.run([adb_bin, "-s", target, "shell", "am", "start", "-n", "com.tvcaster.player/.MainActivity"], capture_output=True, timeout=3)
+    except Exception:
+        pass
+
 def tv_stop():
-    return soap_call("AVTransport", "Stop", "<InstanceID>0</InstanceID>")
+    tv_player_state["state"] = "STOPPED"
+    _issue_tv_command("stop")
+    if not tv_player_state.get("use_custom_player", True):
+        return soap_call("AVTransport", "Stop", "<InstanceID>0</InstanceID>")
+    return "OK"
 
 def tv_play():
-    return soap_call("AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+    tv_player_state["state"] = "PLAYING"
+    _issue_tv_command("play")
+    if not tv_player_state.get("use_custom_player", True):
+        return soap_call("AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+    return "OK"
 
 def tv_pause():
-    return soap_call("AVTransport", "Pause", "<InstanceID>0</InstanceID>")
+    tv_player_state["state"] = "PAUSED_PLAYBACK"
+    _issue_tv_command("pause")
+    if not tv_player_state.get("use_custom_player", True):
+        return soap_call("AVTransport", "Pause", "<InstanceID>0</InstanceID>")
+    return "OK"
 
-def tv_seek(target_time): # HH:MM:SS
-    return soap_call("AVTransport", "Seek", f"<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{target_time}</Target>")
+def tv_seek(target_time): # HH:MM:SS or seconds
+    sec = hms_to_sec(target_time) if isinstance(target_time, str) and ":" in target_time else float(target_time or 0)
+    tv_player_state["position"] = max(0.0, float(sec))
+    _issue_tv_command("seek", target=tv_player_state["position"])
+    if not tv_player_state.get("use_custom_player", True):
+        hms = target_time if isinstance(target_time, str) and ":" in target_time else sec_to_hms(int(sec))
+        return soap_call("AVTransport", "Seek", f"<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{hms}</Target>")
+    return "OK"
 
 def tv_set_volume(vol):
-    return soap_call("RenderingControl", "SetVolume", f"<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>{vol}</DesiredVolume>")
+    vol = max(0, min(100, int(vol)))
+    tv_player_state["volume"] = vol
+    _issue_tv_command("volume", target=vol)
+    if not tv_player_state.get("use_custom_player", True):
+        return soap_call("RenderingControl", "SetVolume", f"<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>{vol}</DesiredVolume>")
+    return "OK"
 
 def tv_get_volume():
+    if tv_player_state.get("use_custom_player", True):
+        return int(tv_player_state.get("volume", 80))
     res = soap_call("RenderingControl", "GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>")
     m = re.search(r'<CurrentVolume>(\d+)</CurrentVolume>', res)
     return int(m.group(1)) if m else 50
 
 def tv_cast_url(stream_url, title="Media Stream"):
+    info = active_sessions.get(current_session_id) or {}
+    start_pos = float(info.get("start_at") or 0)
+    tv_player_state["stream_url"] = stream_url
+    tv_player_state["title"] = title
+    tv_player_state["session_id"] = current_session_id
+    tv_player_state["state"] = "PLAYING"
+    tv_player_state["position"] = start_pos
+    _issue_tv_command("load", target={
+        "url": stream_url,
+        "title": title,
+        "session_id": current_session_id,
+        "start_at": start_pos,
+        "speed": (app_state.get("opts") or {}).get("speed", "1.0x"),
+    })
+    if tv_player_state.get("use_custom_player", True):
+        threading.Thread(target=adb_launch_tv_player, daemon=True).start()
+        return
     tv_stop()
     time.sleep(0.3)
     didl = f'''<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">
@@ -460,6 +548,12 @@ def tv_cast_url(stream_url, title="Media Stream"):
     soap_call("AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
 
 def tv_get_position():
+    if tv_player_state.get("use_custom_player", True):
+        return {
+            "state": tv_player_state.get("state", "STOPPED"),
+            "rel_time": sec_to_hms(int(tv_player_state.get("position") or 0)),
+            "duration": sec_to_hms(int(tv_player_state.get("duration") or 0)),
+        }
     res = soap_call("AVTransport", "GetPositionInfo", "<InstanceID>0</InstanceID>")
     rel_m = re.search(r'<RelTime>([^<]+)</RelTime>', res)
     dur_m = re.search(r'<TrackDuration>([^<]+)</TrackDuration>', res)
@@ -912,51 +1006,72 @@ def inspect_url(url):
     url = normalize_url(url)
     if is_blocked_site(url):
         raise Exception("cloudflare: page is behind a bot check")
+    speeds = ["0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]
     if is_nextembed(url):
         data = nextembed_structure(url)
         if data["kind"] == "series":
             series_episodes(url, info=data)
-        return {"ok": True, "title": data["title"], "kind": data["kind"], "seasons": data["seasons"],
-                "translations": data["translations"], "qualities": ["720p", "360p"], "speeds": ["1.0x", "1.25x", "1.5x"]}
-    if "kinogo" in url or "cinemar.cc" in url:
+        res = {"ok": True, "title": data["title"], "kind": data["kind"], "seasons": data["seasons"],
+               "translations": data["translations"], "qualities": ["720p", "360p"], "speeds": speeds}
+    elif "kinogo" in url or "cinemar.cc" in url:
         data = extract_kinogo(url, mode="info")
         if data.get("kind") == "series":
             series_episodes(url, info=data)
-        return {
+        res = {
             "ok": True,
             "title": data.get("title", "Kinogo Media"),
             "kind": data.get("kind", "movie"),
             "seasons": data.get("seasons", []),
             "translations": data.get("translations", []),
             "qualities": ["720p", "1080p", "480p", "360p"],
-            "speeds": ["1.0x", "1.25x", "1.5x"]
+            "speeds": speeds
         }
     elif is_rezka(url) and REZKA_URL_RE.match(url):
         data = rezka_structure(url)
         series_episodes(url, info=data)
-        return {
+        res = {
             "ok": True, "title": data["title"], "kind": "series", "seasons": data["seasons"], "translations": [],
-            "qualities": ["720p", "1080p", "480p", "360p"], "speeds": ["1.0x", "1.25x", "1.5x"],
+            "qualities": ["720p", "1080p", "480p", "360p"], "speeds": speeds,
         }
     elif "tulsa-king.net" in url or "rezka" in url:
         title, chosen, qualities = extract_rezka(url)
-        return {
+        res = {
             "ok": True,
             "title": title,
+            "seasons": [],
             "translations": [],
             "qualities": qualities or ["720p", "1080p", "480p", "360p"],
-            "speeds": ["1.0x", "1.25x", "1.5x"]
+            "speeds": speeds
         }
     else:
-        return {
+        res = {
             "ok": True,
             "title": "Online Video",
+            "seasons": [],
             "translations": [],
             "qualities": ["720p", "1080p", "480p"],
-            "speeds": ["1.0x", "1.25x", "1.5x"]
+            "speeds": speeds
         }
+    _inspect_cache[url] = res
+    _notify_tv_listeners()
+    return res
+
+def ensure_media_info_cached(url):
+    if not url:
+        return
+    norm = normalize_url(url)
+    if norm in _inspect_cache:
+        return
+    def _bg():
+        try:
+            inspect_url(norm)
+        except Exception:
+            pass
+    threading.Thread(target=_bg, daemon=True).start()
 
 def apply_speed_to_chunk(chunk_bytes, speed_str):
+    if tv_player_state.get("use_custom_player", True):
+        return chunk_bytes
     if not speed_str or speed_str in ("1.0x", "1.0", "1"):
         return chunk_bytes
     try:
@@ -1756,6 +1871,8 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                      episode=episode,
                      opts={"translation_id": translation_id, "quality": quality, "speed": speed,
                            "translation_title": translation_title})
+    ensure_media_info_cached(url)
+    _notify_tv_listeners()
 
     def remember(title):
         had_thumb = any(h.get("url") == url and h.get("thumb") for h in load_history())
@@ -1946,12 +2063,60 @@ MANIFEST = {
 }
 ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect width="512" height="512" rx="112" fill="#0b1120"/><rect x="96" y="132" width="320" height="200" rx="28" fill="none" stroke="url(#g)" stroke-width="28"/><path d="M226 190l76 42-76 42z" fill="url(#g)"/><path d="M160 396h192" stroke="url(#g)" stroke-width="28" stroke-linecap="round"/></svg>"""
 TEMPLATE_FILE = os.path.join(BASE_DIR, "templates", "index.html")
+TV_TEMPLATE_FILE = os.path.join(BASE_DIR, "templates", "tv_player.html")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+def build_tv_state_payload():
+    url = normalize_url(app_state.get("url") or "")
+    cached = _inspect_cache.get(url) or {}
+    info = active_sessions.get(current_session_id) or {}
+    stream_url = tv_player_state.get("stream_url") or ""
+    mp4_url = f"/stream.mp4?v={current_session_id}" if current_session_id and stream_url else ""
+    ts_url = f"/stream.ts?v={current_session_id}" if current_session_id and stream_url else ""
+    opts = dict(app_state.get("opts") or {})
+    if "speed" not in opts or not opts["speed"]:
+        opts["speed"] = "1.0x"
+    if "quality" not in opts or not opts["quality"]:
+        opts["quality"] = "720p"
+    return {
+        "status": app_state.get("status", "idle"),
+        "stage": app_state.get("stage", "extract"),
+        "status_text": app_state.get("status_text", ""),
+        "title": app_state.get("title") or tv_player_state.get("title") or "No media playing",
+        "url": url,
+        "stream_url": stream_url,
+        "mp4_url": mp4_url,
+        "ts_url": ts_url,
+        "session_id": current_session_id,
+        "is_active_download": bool(info.get("active")),
+        "download_progress": app_state.get("download_progress", 0),
+        "download_speed": app_state.get("download_speed", "0 MB/s"),
+        "tv_state": tv_player_state.get("state", "STOPPED"),
+        "position": float(tv_player_state.get("position") or 0),
+        "duration": float(tv_player_state.get("duration") or 0),
+        "volume": int(tv_player_state.get("volume", 80)),
+        "episode": app_state.get("episode"),
+        "seasons": cached.get("seasons", []),
+        "translations": cached.get("translations", []),
+        "qualities": cached.get("qualities", ["1080p", "720p", "480p", "360p"]),
+        "speeds": cached.get("speeds", ["0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]),
+        "audio_tracks": app_state.get("audio_tracks", []),
+        "audio_index": app_state.get("audio_index", 0),
+        "opts": opts,
+        "next_url": bool(url and neighbor_episode(url, app_state.get("episode"), 1)),
+        "prev_url": bool(url and neighbor_episode(url, app_state.get("episode"), -1)),
+        "command_seq": tv_player_state.get("command_seq", 0),
+        "last_command": tv_player_state.get("last_command", {"seq": 0, "type": "none", "target": None}),
+        "error": app_state.get("last_error", ""),
+        "error_hint": app_state.get("error_hint", ""),
+    }
 
 class TVCasterHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        if "/api/status" in (self.path or ""):
+        p = self.path or ""
+        if "/api/status" in p or "/api/tv/state" in p or "/api/tv/report" in p:
             return  # polled every second, would flood the log
         super().log_message(fmt, *args)
 
@@ -1967,6 +2132,16 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         clean = self.path.split("?")[0]
         if clean in ("/", "/index.html"):
             self.serve_ui()
+        elif clean in ("/tv", "/tv/"):
+            self.serve_tv_ui()
+        elif clean == "/api/tv/state":
+            self.send_json(build_tv_state_payload())
+        elif clean == "/api/tv/events":
+            self.serve_tv_events()
+        elif clean in ("/player.apk", "/tv.apk", "/static/tv-caster-player.apk"):
+            self.serve_static("/static/tv-caster-player.apk")
+        elif clean.startswith("/static/"):
+            self.serve_static(clean)
         elif clean == "/api/status":
             self.serve_status()
         elif clean == "/api/history":
@@ -1988,6 +2163,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.send_bytes(ICON_SVG.encode(), "image/svg+xml")
         elif clean.startswith("/stream.ts"):
             self.serve_stream(send_body=True)
+        elif clean.startswith("/stream.mp4"):
+            self.serve_stream_mp4()
         else:
             self.send_error(404)
 
@@ -2010,6 +2187,130 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(info)
             except Exception as e:
                 self.send_json({"ok": False, "error": friendly_error(e)[0]})
+
+        elif clean == "/api/tv/report":
+            if "state" in data and data["state"]:
+                tv_player_state["state"] = str(data["state"])
+            if "position" in data and data["position"] is not None:
+                tv_player_state["position"] = max(0.0, float(data["position"]))
+            if "duration" in data and data["duration"] is not None and float(data["duration"]) > 0:
+                tv_player_state["duration"] = max(0.0, float(data["duration"]))
+            if "volume" in data and data["volume"] is not None:
+                tv_player_state["volume"] = max(0, min(100, int(data["volume"])))
+            tv_player_state["last_report_at"] = time.time()
+            self.send_json({"ok": True})
+
+        elif clean == "/api/tv/action":
+            action = data.get("action", "")
+            opts = app_state.setdefault("opts", {})
+            url = app_state.get("url") or ""
+            cur_pos = int(tv_player_state.get("position") or 0)
+
+            if action == "set_speed":
+                spd = data.get("speed", "1.0x")
+                opts["speed"] = spd
+                _issue_tv_command("speed", target=spd)
+                self.send_json({"ok": True, "speed": spd})
+            elif action == "play":
+                tv_play()
+                self.send_json({"ok": True})
+            elif action == "pause":
+                tv_pause()
+                self.send_json({"ok": True})
+            elif action == "toggle_pause":
+                if tv_player_state.get("state") == "PLAYING":
+                    tv_pause()
+                else:
+                    tv_play()
+                self.send_json({"ok": True, "state": tv_player_state.get("state")})
+            elif action == "seek":
+                tv_seek(data.get("target", 0))
+                self.send_json({"ok": True, "position": tv_player_state.get("position")})
+            elif action == "volume":
+                tv_set_volume(data.get("value", 80))
+                self.send_json({"ok": True, "volume": tv_player_state.get("volume")})
+            elif action == "stop":
+                with session_lock:
+                    if current_session_id in active_sessions:
+                        cancel_session(active_sessions[current_session_id])
+                tv_stop()
+                app_state["status"] = "idle"
+                app_state["status_text"] = "Остановлено"
+                self.send_json({"ok": True})
+            elif action in ("next_episode", "prev_episode"):
+                ok, err = cast_neighbor(1 if action == "next_episode" else -1)
+                self.send_json({"ok": ok, "error": err})
+            elif action == "switch_episode":
+                ep = data.get("episode")
+                if not url or not ep:
+                    self.send_json({"ok": False, "error": "URL or episode missing"})
+                    return
+                threading.Thread(
+                    target=handle_cast_request,
+                    kwargs=dict(
+                        url=url,
+                        translation_id=opts.get("translation_id"),
+                        quality=opts.get("quality", "720p"),
+                        speed=opts.get("speed", "1.0x"),
+                        start_at=0,
+                        audio_idx=app_state.get("audio_index", 0),
+                        episode=ep,
+                        translation_title=opts.get("translation_title"),
+                    ),
+                    daemon=True,
+                ).start()
+                self.send_json({"ok": True, "episode": ep})
+            elif action == "switch_translation":
+                tr_id = data.get("translation_id")
+                tr_title = data.get("translation_title")
+                if not url:
+                    self.send_json({"ok": False, "error": "No active media URL"})
+                    return
+                threading.Thread(
+                    target=handle_cast_request,
+                    kwargs=dict(
+                        url=url,
+                        translation_id=tr_id,
+                        quality=opts.get("quality", "720p"),
+                        speed=opts.get("speed", "1.0x"),
+                        start_at=cur_pos,
+                        audio_idx=0,
+                        episode=app_state.get("episode"),
+                        translation_title=tr_title,
+                    ),
+                    daemon=True,
+                ).start()
+                self.send_json({"ok": True, "translation_id": tr_id})
+            elif action == "switch_audio_track":
+                idx = int(data.get("index", 0))
+                ok, err = switch_audio(idx)
+                self.send_json({"ok": ok, "error": err})
+            elif action == "switch_quality":
+                qual = data.get("quality", "720p")
+                if not url:
+                    opts["quality"] = qual
+                    self.send_json({"ok": True, "quality": qual})
+                    return
+                threading.Thread(
+                    target=handle_cast_request,
+                    kwargs=dict(
+                        url=url,
+                        translation_id=opts.get("translation_id"),
+                        quality=qual,
+                        speed=opts.get("speed", "1.0x"),
+                        start_at=cur_pos,
+                        audio_idx=app_state.get("audio_index", 0),
+                        episode=app_state.get("episode"),
+                        translation_title=opts.get("translation_title"),
+                    ),
+                    daemon=True,
+                ).start()
+                self.send_json({"ok": True, "quality": qual})
+            elif action == "set_player_mode":
+                tv_player_state["use_custom_player"] = bool(data.get("use_custom_player", True))
+                self.send_json({"ok": True, "use_custom_player": tv_player_state["use_custom_player"]})
+            else:
+                self.send_json({"ok": False, "error": f"Unknown action: {action}"})
 
         elif clean == "/api/cast":
             url = data.get("url", "")
@@ -2245,6 +2546,158 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    def serve_tv_ui(self):
+        try:
+            with open(TV_TEMPLATE_FILE, "rb") as f:
+                body = f.read()
+        except OSError:
+            self.send_error(500, "templates/tv_player.html is missing")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_static(self, clean_path):
+        rel = clean_path[len("/static/"):] if clean_path.startswith("/static/") else clean_path.lstrip("/")
+        norm_rel = os.path.normpath(rel)
+        if norm_rel.startswith(".."):
+            self.send_error(403)
+            return
+        full_path = os.path.join(STATIC_DIR, norm_rel)
+        if not os.path.isfile(full_path):
+            self.send_error(404)
+            return
+        ext = os.path.splitext(full_path)[1].lower()
+        ctypes = {
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".apk": "application/vnd.android.package-archive",
+        }
+        ctype = ctypes.get(ext, "application/octet-stream")
+        with open(full_path, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_tv_events(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            while True:
+                payload = json.dumps(build_tv_state_payload(), ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                with _tv_event_cond:
+                    _tv_event_cond.wait(timeout=1.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def serve_stream_mp4(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        v_param = query.get("v", [None])[0]
+        seek_sec = float(query.get("t", ["0"])[0] or 0)
+        try:
+            req_session_id = int(v_param) if v_param else current_session_id
+        except Exception:
+            req_session_id = current_session_id
+
+        session_info = active_sessions.get(req_session_id)
+        target_file = session_info["file"] if (session_info and os.path.exists(session_info["file"])) else CURRENT_FILE
+        if not session_info and v_param and v_param.isdigit():
+            leftover = os.path.join(CACHE_DIR, f"stream_{v_param}.ts")
+            if os.path.exists(leftover):
+                target_file = leftover
+
+        if not os.path.exists(target_file):
+            self.send_error(404, "Stream file not ready yet")
+            return
+
+        is_active = session_info.get("active", False) if session_info else False
+        cancel_event = session_info.get("cancel_event") if session_info else threading.Event()
+        ff = get_ffmpeg()
+
+        self.send_response(200, "OK")
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        proc = None
+        try:
+            if not is_active and seek_sec > 0:
+                cmd = [
+                    ff, "-hide_banner", "-loglevel", "error",
+                    "-ss", str(seek_sec),
+                    "-i", target_file,
+                    "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                    "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                    "pipe:1"
+                ]
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                while not cancel_event.is_set():
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            else:
+                cmd = [
+                    ff, "-hide_banner", "-loglevel", "error",
+                    "-i", "pipe:0",
+                    "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                    "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                    "pipe:1"
+                ]
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+                def feed_ts():
+                    try:
+                        with open(target_file, "rb") as f:
+                            while not cancel_event.is_set() and proc.poll() is None:
+                                buf = f.read(65536)
+                                if not buf:
+                                    if session_info and session_info.get("active", False):
+                                        time.sleep(0.1)
+                                        continue
+                                    break
+                                proc.stdin.write(buf)
+                    except (BrokenPipeError, OSError, ValueError):
+                        pass
+                    finally:
+                        try:
+                            proc.stdin.close()
+                        except Exception:
+                            pass
+
+                threading.Thread(target=feed_ts, daemon=True).start()
+                while not cancel_event.is_set():
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            print("MP4 stream error:", e)
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
