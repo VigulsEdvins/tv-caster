@@ -69,6 +69,13 @@ class TestTVPlayerUI(unittest.TestCase):
             proc = subprocess.run([node_bin, "--check", js_file], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, f"JS syntax error: {proc.stderr}")
 
+    def test_tv_js_direct_stream_support(self):
+        status, js, _ = self._get("/static/tv/tv_player.js")
+        self.assertEqual(status, 200)
+        self.assertIn("loadStreamWithHeaders", js)
+        self.assertIn("direct_stream", js)
+        self.assertIn("onNativePlayerError", js)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -72,6 +72,7 @@
   let knownDuration = 0;
   let isPaused = false;
   let currentSpeed = 1.0;
+  let directProxyFallbackUsed = false;
 
   // UI Navigation State
   let dockPosition = localStorage.getItem("tv_dock_position") || "bottom";
@@ -164,12 +165,16 @@
   }
 
   // Player Adapter (works with Native AndroidBridge OR HTML5 Video)
-  function playerLoad(stateObj, startAtSec, streamOffsetSec, forceReload) {
+  function playerLoad(stateObj, startAtSec, streamOffsetSec, forceReload, forceServerProxy) {
     const sid = stateObj.session_id;
     if (!sid) return;
+    if (currentSessionId !== sid) {
+      directProxyFallbackUsed = false;
+    }
     currentSessionId = sid;
+    const isDirect = Boolean(stateObj.direct_stream);
     const startSec = Math.max(0, Number(startAtSec || 0));
-    const offsetSec = Math.max(0, Number(streamOffsetSec !== undefined ? streamOffsetSec : (stateObj.stream_offset || 0)));
+    const offsetSec = isDirect ? 0 : Math.max(0, Number(streamOffsetSec !== undefined ? streamOffsetSec : (stateObj.stream_offset || 0)));
     baseSeekOffset = offsetSec;
     pendingSeekTarget = null;
     if (seekCommitTimer) {
@@ -181,17 +186,44 @@
     isPaused = false;
 
     if (hasNativeBridge) {
-      const rawTs = stateObj.ts_url || `/stream.ts?v=${sid}`;
-      let fullTsUrl = (rawTs.startsWith("http://") || rawTs.startsWith("https://")) ? rawTs : window.location.origin + rawTs;
-      if (forceReload) {
-        fullTsUrl += (fullTsUrl.includes("?") ? "&" : "?") + `r=${Date.now()}`;
+      if (isDirect) {
+        const useProxy = Boolean(forceServerProxy || directProxyFallbackUsed || !stateObj.cdn_url);
+        const rawTarget = useProxy
+          ? (stateObj.direct_url || `/direct/stream?v=${sid}`)
+          : stateObj.cdn_url;
+        let fullTargetUrl = (rawTarget.startsWith("http://") || rawTarget.startsWith("https://"))
+          ? rawTarget
+          : window.location.origin + rawTarget;
+        if (forceReload && useProxy) {
+          fullTargetUrl += (fullTargetUrl.includes("?") ? "&" : "?") + `r=${Date.now()}`;
+        }
+        const headersJson = JSON.stringify(useProxy ? {} : (stateObj.direct_headers || {}));
+        if (typeof window.AndroidBridge.loadStreamWithHeaders === "function") {
+          window.AndroidBridge.loadStreamWithHeaders(fullTargetUrl, headersJson, relSeek, currentSpeed);
+        } else {
+          window.AndroidBridge.loadStream(fullTargetUrl, relSeek, currentSpeed);
+        }
+      } else {
+        const rawTs = stateObj.ts_url || `/stream.ts?v=${sid}`;
+        let fullTsUrl = (rawTs.startsWith("http://") || rawTs.startsWith("https://")) ? rawTs : window.location.origin + rawTs;
+        if (forceReload) {
+          fullTsUrl += (fullTsUrl.includes("?") ? "&" : "?") + `r=${Date.now()}`;
+        }
+        window.AndroidBridge.loadStream(fullTsUrl, relSeek, 1.0);
       }
-      window.AndroidBridge.loadStream(fullTsUrl, relSeek, 1.0);
     } else {
-      const mp4Url = `/stream.mp4?v=${sid}` + (relSeek > 0 ? `&t=${relSeek}` : "");
-      videoEl.src = mp4Url;
-      videoEl.playbackRate = 1.0;
-      videoEl.play().catch(() => {});
+      if (isDirect) {
+        const directPath = stateObj.direct_url || `/direct/stream?v=${sid}`;
+        videoEl.src = directPath;
+        videoEl.currentTime = relSeek;
+        videoEl.playbackRate = currentSpeed;
+        videoEl.play().catch(() => {});
+      } else {
+        const mp4Url = `/stream.mp4?v=${sid}` + (relSeek > 0 ? `&t=${relSeek}` : "");
+        videoEl.src = mp4Url;
+        videoEl.playbackRate = 1.0;
+        videoEl.play().catch(() => {});
+      }
     }
     standbyScreen.classList.add("hidden");
     updatePlayButtonUI(false);
@@ -200,6 +232,14 @@
       setFocus(document.getElementById("btn-play"));
     }
   }
+
+  window.onNativePlayerError = function () {
+    if (serverState && serverState.direct_stream && !directProxyFallbackUsed) {
+      directProxyFallbackUsed = true;
+      const curPos = playerGetPosition();
+      playerLoad(serverState, curPos, 0, true, true);
+    }
+  };
 
   function playerPlay() {
     isPaused = false;
@@ -238,23 +278,27 @@
   function playerGetPosition() {
     if (!currentSessionId) return 0;
     if (pendingSeekTarget !== null) return pendingSeekTarget;
+    const isDirect = Boolean(serverState && serverState.direct_stream);
+    const spdFactor = isDirect ? 1.0 : currentSpeed;
     if (hasNativeBridge) {
       const raw = Number(window.AndroidBridge.getPosition() || 0);
-      return baseSeekOffset + raw * currentSpeed;
+      return baseSeekOffset + raw * spdFactor;
     }
-    return baseSeekOffset + Number(videoEl.currentTime || 0) * currentSpeed;
+    return baseSeekOffset + Number(videoEl.currentTime || 0) * spdFactor;
   }
 
   function playerGetDuration() {
     if (!currentSessionId) return 0;
+    const isDirect = Boolean(serverState && serverState.direct_stream);
+    const spdFactor = isDirect ? 1.0 : currentSpeed;
     const srvDur = Math.max(knownDuration, Number(serverState.duration || 0));
     if (srvDur > 0 && srvDur < 43200) return srvDur;
     if (hasNativeBridge) {
       const d = Number(window.AndroidBridge.getDuration() || 0);
-      if (d > 0 && d < 43200) return baseSeekOffset + d * currentSpeed;
+      if (d > 0 && d < 43200) return baseSeekOffset + d * spdFactor;
     } else {
       const d = Number(videoEl.duration || 0);
-      if (isFinite(d) && d > 0 && d < 43200) return baseSeekOffset + d * currentSpeed;
+      if (isFinite(d) && d > 0 && d < 43200) return baseSeekOffset + d * spdFactor;
     }
     return srvDur;
   }
@@ -263,32 +307,49 @@
     if (!currentSessionId) return;
     const dur = playerGetDuration();
     targetSec = Math.max(0, dur > 0 ? Math.min(targetSec, dur - 2) : targetSec);
+    const isDirect = Boolean(serverState && serverState.direct_stream);
 
     if (hasNativeBridge) {
-      const nativeDur = Number(window.AndroidBridge.getDuration() || 0);
-      const relTarget = Math.floor((targetSec - baseSeekOffset) / (currentSpeed || 1.0));
-      if (nativeDur > 0 && currentSpeed === 1.0 && targetSec >= baseSeekOffset && !serverState.is_active_download) {
-        window.AndroidBridge.seekTo(Math.max(0, relTarget));
+      if (isDirect) {
+        window.AndroidBridge.seekTo(Math.max(0, Math.floor(targetSec)));
         pendingSeekTarget = null;
-      } else if (fromRemote) {
-        postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
-      }
-    } else {
-      const relTarget = (targetSec - baseSeekOffset) / (currentSpeed || 1.0);
-      let canSeekInBuffer = false;
-      if (relTarget >= 0 && videoEl.buffered && videoEl.buffered.length > 0) {
-        for (let i = 0; i < videoEl.buffered.length; i++) {
-          if (relTarget >= videoEl.buffered.start(i) && relTarget <= videoEl.buffered.end(i)) {
-            canSeekInBuffer = true;
-            break;
-          }
+        if (fromRemote) {
+          postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
+        }
+      } else {
+        const nativeDur = Number(window.AndroidBridge.getDuration() || 0);
+        const relTarget = Math.floor((targetSec - baseSeekOffset) / (currentSpeed || 1.0));
+        if (nativeDur > 0 && currentSpeed === 1.0 && targetSec >= baseSeekOffset && !serverState.is_active_download) {
+          window.AndroidBridge.seekTo(Math.max(0, relTarget));
+          pendingSeekTarget = null;
+        } else if (fromRemote) {
+          postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
         }
       }
-      if (canSeekInBuffer) {
-        videoEl.currentTime = relTarget;
+    } else {
+      if (isDirect) {
+        videoEl.currentTime = Math.max(0, targetSec);
         pendingSeekTarget = null;
-      } else if (fromRemote) {
-        postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
+        if (fromRemote) {
+          postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
+        }
+      } else {
+        const relTarget = (targetSec - baseSeekOffset) / (currentSpeed || 1.0);
+        let canSeekInBuffer = false;
+        if (relTarget >= 0 && videoEl.buffered && videoEl.buffered.length > 0) {
+          for (let i = 0; i < videoEl.buffered.length; i++) {
+            if (relTarget >= videoEl.buffered.start(i) && relTarget <= videoEl.buffered.end(i)) {
+              canSeekInBuffer = true;
+              break;
+            }
+          }
+        }
+        if (canSeekInBuffer) {
+          videoEl.currentTime = relTarget;
+          pendingSeekTarget = null;
+        } else if (fromRemote) {
+          postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
+        }
       }
     }
     updateTimelineUI(targetSec, dur);
@@ -596,7 +657,7 @@
           serverState.opts.speed = s;
           badgeSpeed.textContent = s;
           subSpeed.textContent = s;
-          showToast(`⚡ Скорость: ${s}…`);
+          playerSetSpeed(s);
           postAction({ action: "set_speed", speed: s });
         };
         modalOptionsGrid.appendChild(btn);
