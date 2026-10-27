@@ -1,5 +1,6 @@
 import concurrent.futures
 import glob
+import hashlib
 import html
 import http.cookiejar
 import http.server
@@ -30,7 +31,7 @@ VENV_DIR = os.environ.get("TV_CASTER_VENV", "/home/edvins/.gemini/antigravity/sc
 YT_DLP_BIN = shutil.which("yt-dlp") or os.path.join(VENV_DIR, "bin", "yt-dlp")
 NODE_BIN = shutil.which("node") or "/home/edvins/.local/bin/node"
 YT_DLP_BASE = [YT_DLP_BIN, "--no-check-certificates", "--js-runtimes", f"node:{NODE_BIN}"]
-CACHE_MAX_AGE = 5 * 60  # seconds; older cache files are removed when a new cast starts
+CACHE_MAX_AGE = 45 * 60  # seconds; older cache files are removed when a new cast starts
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -535,6 +536,10 @@ def tv_get_volume():
     return int(m.group(1)) if m else 50
 
 def tv_cast_url(stream_url, title="Media Stream"):
+    with session_lock:
+        for sid, sinfo in list(active_sessions.items()):
+            if sid != current_session_id and sinfo.get("active"):
+                cancel_session(sinfo)
     info = active_sessions.get(current_session_id) or {}
     start_pos = float(info.get("start_at") or 0)
     stream_offset = float(info.get("stream_offset") or 0)
@@ -598,37 +603,46 @@ def extract_kinogo(url, translation_id=None, quality="720p", mode="stream", epis
         raise Exception(f"Kinogo extraction failed: {proc.stderr.strip() or proc.stdout.strip()}")
     return json.loads(proc.stdout)
 
+_rezka_streams_cache = {}
+
 def extract_rezka(url, quality="720p"):
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    import gzip
-    with urllib.request.urlopen(req) as resp:
-        data = resp.read()
-        try:
-            html_text = gzip.decompress(data).decode('utf-8', errors='ignore')
-        except:
-            html_text = data.decode('utf-8', errors='ignore')
+    now = time.time()
+    cached = _rezka_streams_cache.get(url)
+    if cached and (now - cached[2]) < 1800:
+        title, streams_map = cached[0], cached[1]
+    else:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        import gzip
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read()
+            try:
+                html_text = gzip.decompress(data).decode('utf-8', errors='ignore')
+            except Exception:
+                html_text = data.decode('utf-8', errors='ignore')
 
-    m = re.search(r'\"streams\":\s*\"([^\"]+)\"', html_text)
-    if not m:
-        raise Exception("Could not locate stream metadata on page")
+        m = re.search(r'\"streams\":\s*\"([^\"]+)\"', html_text)
+        if not m:
+            raise Exception("Could not locate stream metadata on page")
 
-    streams_raw = m.group(1).replace(r'\/', '/')
-    title_m = re.search(r'<title>(.*?)</title>', html_text)
-    raw_title = title_m.group(1) if title_m else "Web Episode"
-    title = re.sub(r'смотреть онлайн.*$', '', raw_title).strip()
-    title = title.replace('Смотреть сериал ', '').strip()
-    title = re.sub(r'\s*онлайн.*$', '', title).strip()
+        streams_raw = m.group(1).replace(r'\/', '/')
+        title_m = re.search(r'<title>(.*?)</title>', html_text)
+        raw_title = title_m.group(1) if title_m else "Web Episode"
+        title = re.sub(r'смотреть онлайн.*$', '', raw_title).strip()
+        title = title.replace('Смотреть сериал ', '').strip()
+        title = re.sub(r'\s*онлайн.*$', '', title).strip()
 
-    streams_map = {}
-    for item in streams_raw.split(','):
-        m_q = re.match(r'\[(\w+)\]', item)
-        if m_q:
-            q = m_q.group(1)
-            for l in item.split(' or '):
-                clean_l = re.sub(r'^\[\w+\]', '', l).strip()
-                if clean_l.endswith('.mp4'):
-                    streams_map[q] = clean_l
-                    break
+        streams_map = {}
+        for item in streams_raw.split(','):
+            m_q = re.match(r'\[(\w+)\]', item)
+            if m_q:
+                q = m_q.group(1)
+                for l in item.split(' or '):
+                    clean_l = re.sub(r'^\[\w+\]', '', l).strip()
+                    if clean_l.endswith('.mp4'):
+                        streams_map[q] = clean_l
+                        break
+        if streams_map:
+            _rezka_streams_cache[url] = (title, streams_map, now)
 
     q_clean = quality.lower().replace(" ", "").replace("fullhd", "").replace("hd", "")
     chosen = streams_map.get(q_clean) or streams_map.get('720p') or streams_map.get('480p') or streams_map.get('1080p') or list(streams_map.values())[0]
@@ -1764,22 +1778,117 @@ def _start_range_proxy(target_url, cancel_event, on_bytes):
     return httpd, f"http://127.0.0.1:{port}/video.mp4"
 
 
+_mp4_cache = {}
+_mp4_cache_lock = threading.Lock()
+
+
+def get_or_start_mp4_cache(url):
+    """Download an MP4 URL once into CACHE_DIR so speed/seek switches reuse the local file without re-downloading."""
+    url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()[:16]
+    mp4_path = os.path.join(CACHE_DIR, f"source_{url_hash}.mp4")
+    with _mp4_cache_lock:
+        entry = _mp4_cache.get(url)
+        if entry and os.path.exists(entry["path"]) and (entry["complete"] or entry["active"]):
+            return entry
+        if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 20 * 1024 * 1024:
+            sz = os.path.getsize(mp4_path)
+            with open(mp4_path, "rb") as f:
+                head = f.read(4 * 1024 * 1024)
+            ev = threading.Event()
+            ev.set()
+            entry = {
+                "url": url,
+                "path": mp4_path,
+                "total": sz,
+                "downloaded": sz,
+                "complete": True,
+                "active": False,
+                "head": head,
+                "error": None,
+                "started_at": time.time(),
+                "ready_event": ev,
+            }
+            _mp4_cache[url] = entry
+            return entry
+        entry = {
+            "url": url,
+            "path": mp4_path,
+            "total": 0,
+            "downloaded": 0,
+            "complete": False,
+            "active": True,
+            "head": b"",
+            "error": None,
+            "started_at": time.time(),
+            "ready_event": threading.Event(),
+        }
+        _mp4_cache[url] = entry
+
+    def _worker():
+        resp = None
+        try:
+            resp = urlopen_fast(urllib.request.Request(url, headers=DL_HEADERS))
+            total = int(resp.headers.get("Content-Length") or 0)
+            entry["total"] = total
+            head_chunks = []
+            head_len = 0
+            with open(mp4_path, "wb") as f:
+                while True:
+                    buf = resp.read(256 * 1024)
+                    if not buf:
+                        break
+                    f.write(buf)
+                    entry["downloaded"] += len(buf)
+                    if head_len < 4 * 1024 * 1024:
+                        head_chunks.append(buf)
+                        head_len += len(buf)
+                        if head_len >= 4 * 1024 * 1024:
+                            entry["head"] = b"".join(head_chunks)[:4 * 1024 * 1024]
+                            entry["ready_event"].set()
+            if not entry["ready_event"].is_set():
+                entry["head"] = b"".join(head_chunks)
+                entry["ready_event"].set()
+            if total and entry["downloaded"] < total:
+                raise Exception(f"timed out: download interrupted at {entry['downloaded'] * 100 // total}%")
+            entry["complete"] = True
+        except Exception as e:
+            entry["error"] = e
+            entry["ready_event"].set()
+        finally:
+            entry["active"] = False
+            if resp:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return entry
+
+
 def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=0):
-    """Pipe a 'fast start' MP4 through ffmpeg into the growing session file; supports live seek and speed."""
+    """Pipe or read a cached MP4 through ffmpeg into the session file; reuses local MP4 cache on speed/seek changes."""
     info = active_sessions.get(session_id)
     if not info:
         return
     cancel_event = info["cancel_event"]
-    resp = proc = proxy_httpd = None
+    proc = proxy_httpd = None
     try:
-        if session_id == current_session_id:
+        cache_entry = get_or_start_mp4_cache(url)
+        if session_id == current_session_id and not cache_entry["complete"]:
             app_state.update(status="downloading", stage="download", status_text="Загружаю видео", title=title, download_progress=0)
-        resp = urlopen_fast(urllib.request.Request(url, headers=DL_HEADERS))
-        total = int(resp.headers.get("Content-Length") or 0)
-        head = resp.read(4 * 1024 * 1024)
+        elif session_id == current_session_id:
+            app_state.update(title=title, download_progress=100)
+
+        cache_entry["ready_event"].wait(timeout=15)
+        if cancel_event.is_set():
+            return
+        if cache_entry["error"] and not cache_entry["head"]:
+            raise cache_entry["error"]
+
+        head = cache_entry["head"]
+        total = cache_entry["total"]
         if not moov_in_head(head):
-            resp.close()
-            resp = None
             return download_dash(session_id, title, [url], speed, audio_idx)
 
         audios = [x for x in probe_streams(data=head) if x["type"] == "Audio"]
@@ -1809,10 +1918,16 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
         convert_audio = bool(audios) and audios[audio_idx]["codec"] not in SAFE_AUDIO
         cmd = [get_ffmpeg(), "-y", "-nostdin", "-loglevel", "error"]
 
-        use_proxy = seek_sec > 0
-        if use_proxy:
-            resp.close()
-            resp = None
+        is_cached_locally = cache_entry["complete"] and os.path.exists(cache_entry["path"])
+        use_proxy = (seek_sec > 0) and not is_cached_locally
+
+        if is_cached_locally:
+            info["stream_offset"] = float(seek_sec)
+            info["resumed"] = True
+            if seek_sec > 0:
+                cmd += ["-ss", str(seek_sec)]
+            cmd += ["-i", cache_entry["path"]]
+        elif use_proxy:
             info["stream_offset"] = float(seek_sec)
             info["resumed"] = True
             proxy_httpd, proxy_url = _start_range_proxy(url, cancel_event, on_proxy_bytes)
@@ -1842,25 +1957,28 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
             cmd += ["-c:v", "copy"] + (["-c:a", "aac", "-ac", "2", "-b:a", "192k"] if convert_audio else ["-c:a", "copy"])
 
         cmd += ["-f", "mpegts", info["file"]]
+        use_stdin = not (is_cached_locally or use_proxy)
         proc = subprocess.Popen(
             cmd,
-            stdin=None if use_proxy else subprocess.PIPE,
+            stdin=subprocess.PIPE if use_stdin else None,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
 
         feeder = None
-        if not use_proxy:
-            def feed():
+        if use_stdin:
+            def feed_from_cache_file():
                 try:
-                    proc.stdin.write(head)
-                    fed[0] += len(head)
-                    while not cancel_event.is_set():
-                        buf = resp.read(256 * 1024)
-                        if not buf:
-                            break
-                        proc.stdin.write(buf)
-                        fed[0] += len(buf)
+                    with open(cache_entry["path"], "rb") as f:
+                        while not cancel_event.is_set() and proc.poll() is None:
+                            buf = f.read(256 * 1024)
+                            if not buf:
+                                if cache_entry["active"]:
+                                    time.sleep(0.05)
+                                    continue
+                                break
+                            proc.stdin.write(buf)
+                            fed[0] += len(buf)
                 except (BrokenPipeError, OSError, ValueError):
                     pass
                 finally:
@@ -1868,10 +1986,10 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
                         proc.stdin.close()
                     except OSError:
                         pass
-            feeder = threading.Thread(target=feed, daemon=True)
+            feeder = threading.Thread(target=feed_from_cache_file, daemon=True)
             feeder.start()
 
-        start_threshold = 1536 * 1024 if (use_proxy or abs(rate - 1.0) > 0.02) else 2 * 1024 * 1024
+        start_threshold = 640 * 1024 if is_cached_locally else (1536 * 1024 if (use_proxy or abs(rate - 1.0) > 0.02) else 2 * 1024 * 1024)
         cast_triggered = False
         local_stream_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
         while proc.poll() is None:
@@ -1879,17 +1997,28 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
                 proc.kill()
                 return
             if session_id == current_session_id:
-                dur = max(time.time() - start_time, 0.1)
-                app_state["download_speed"] = f"{fed[0] / 1048576 / dur:.1f} MB/s"
-                app_state["total_size"] = f"{fed[0] / 1048576:.0f} MB"
-                if total:
-                    app_state["download_progress"] = min(99, int(fed[0] * 100 / total))
+                if is_cached_locally or cache_entry["complete"]:
+                    app_state["download_progress"] = 100
+                    app_state["download_speed"] = "Локальный кэш"
+                    if total:
+                        app_state["total_size"] = f"{total / 1048576:.0f} MB"
+                else:
+                    dl_bytes = cache_entry["downloaded"] or fed[0]
+                    dur = max(time.time() - cache_entry["started_at"], 0.1)
+                    app_state["download_speed"] = f"{dl_bytes / 1048576 / dur:.1f} MB/s"
+                    app_state["total_size"] = f"{dl_bytes / 1048576:.0f} MB"
+                    if total:
+                        app_state["download_progress"] = min(99, int(dl_bytes * 100 / total))
             if not cast_triggered and os.path.exists(info["file"]) and os.path.getsize(info["file"]) >= start_threshold:
                 cast_triggered = True
                 if session_id == current_session_id:
-                    app_state.update(stage="tv", status_text="Играет на ТВ, догружаю")
+                    app_state.update(
+                        status="playing" if (is_cached_locally or cache_entry["complete"]) else "downloading",
+                        stage="tv",
+                        status_text="Играет на ТВ" if (is_cached_locally or cache_entry["complete"]) else "Играет на ТВ, догружаю",
+                    )
                 tv_cast_url(local_stream_url, title)
-            time.sleep(0.2)
+            time.sleep(0.08 if is_cached_locally else 0.2)
 
         if feeder:
             feeder.join(5)
@@ -1898,13 +2027,12 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
         if proc.returncode != 0:
             tail = proc.stderr.read().decode("utf-8", errors="ignore").strip().splitlines()[-1:] or [""]
             raise Exception("FFmpeg failed: " + tail[0])
-        if not use_proxy and total and fed[0] < total:
-            raise Exception(f"timed out: download interrupted at {fed[0] * 100 // total}%")
+        if not is_cached_locally and not use_proxy and cache_entry["error"]:
+            raise cache_entry["error"]
         info["active"] = False
         if not cast_triggered:
             tv_cast_url(local_stream_url, title)
         elif session_id == current_session_id and not tv_player_state.get("use_custom_player", True):
-            # live TS has no duration and cannot seek: reload the finished file at the same spot
             pos = tv_get_position()
             if pos["state"] == "PLAYING":
                 at = hms_to_sec(pos["rel_time"])
@@ -1927,11 +2055,6 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
                 proxy_httpd.server_close()
             except Exception:
                 pass
-        if resp:
-            try:
-                resp.close()
-            except Exception:
-                pass
 
 def download_and_stream_mp4(session_id, title, mp4_url, speed="1.0x", audio_idx=0, start_at=0):
     stream_mp4_live(session_id, title, mp4_url, speed, audio_idx, start_at=start_at)
@@ -1949,12 +2072,16 @@ def ytdlp_streams(url, quality):
         raise Exception("yt-dlp could not extract: " + last)
     return lines[0], lines[1:3]
 
-def new_session(keep_extra=()):
+def new_session(keep_extra=(), seamless=False):
     """Cancel the running session and register a new one; returns (session_id, session_file)."""
     global current_session_id
     with session_lock:
+        prev_file = None
         if current_session_id in active_sessions:
-            cancel_session(active_sessions[current_session_id])
+            prev_info = active_sessions[current_session_id]
+            prev_file = prev_info.get("file")
+            if not seamless:
+                cancel_session(prev_info)
         session_id = int(time.time() * 1000)
         current_session_id = session_id
         session_file = os.path.join(CACHE_DIR, f"stream_{session_id}.ts")
@@ -1964,7 +2091,11 @@ def new_session(keep_extra=()):
             "cancel_event": threading.Event(),
             "procs": set(),
         }
-        cleanup_cache(keep={session_file, *keep_extra})
+        cached_mp4s = {e["path"] for e in _mp4_cache.values() if e.get("path")}
+        keep_set = {session_file, *keep_extra, *cached_mp4s}
+        if prev_file:
+            keep_set.add(prev_file)
+        cleanup_cache(keep=keep_set)
     return session_id, session_file
 
 def resume_seek(session_id, start_at):
@@ -1985,34 +2116,44 @@ def resume_seek(session_id, start_at):
             info["resumed"] = True
             return
 
-def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", start_at=0, audio_idx=0, episode=None, translation_title=None):
+def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", start_at=0, audio_idx=0, episode=None, translation_title=None, seamless=False):
     global app_state
 
-    session_id, session_file = new_session()
+    session_id, session_file = new_session(seamless=seamless)
     phase(session_id, "session created")
     info = active_sessions[session_id]
     info["start_at"] = start_at
     if not start_at:
         info["resumed"] = True
 
-    # Stop TV immediately on new cast request
-    tv_player_state["stream_url"] = ""
-    tv_player_state["session_id"] = 0
-    tv_stop()
-    if tv_player_state.get("use_custom_player", True):
-        threading.Thread(target=adb_launch_tv_player, daemon=True).start()
-    time.sleep(0.2)
-    phase(session_id, "tv stopped")
+    if not seamless:
+        # Stop TV immediately on brand-new cast request
+        tv_player_state["stream_url"] = ""
+        tv_player_state["session_id"] = 0
+        tv_stop()
+        if tv_player_state.get("use_custom_player", True):
+            threading.Thread(target=adb_launch_tv_player, daemon=True).start()
+        time.sleep(0.2)
+        phase(session_id, "tv stopped")
 
     url = normalize_url(url)
     if not episode and is_rezka(url):
         episode = rezka_episode_id(url)
-    app_state.update(status="preparing", stage="extract", status_text="Ищу видео", title="Подготовка…", url=url,
-                     last_error="", error_hint="", download_progress=0, download_speed="0 MB/s",
-                     total_size="0 MB", started_at=time.time(), audio_tracks=[], audio_index=0,
-                     episode=episode,
-                     opts={"translation_id": translation_id, "quality": quality, "speed": speed,
-                           "translation_title": translation_title})
+    if seamless:
+        app_state.update(
+            url=url,
+            last_error="",
+            error_hint="",
+            episode=episode,
+            opts={"translation_id": translation_id, "quality": quality, "speed": speed, "translation_title": translation_title},
+        )
+    else:
+        app_state.update(status="preparing", stage="extract", status_text="Ищу видео", title="Подготовка…", url=url,
+                         last_error="", error_hint="", download_progress=0, download_speed="0 MB/s",
+                         total_size="0 MB", started_at=time.time(), audio_tracks=[], audio_index=0,
+                         episode=episode,
+                         opts={"translation_id": translation_id, "quality": quality, "speed": speed,
+                               "translation_title": translation_title})
     ensure_media_info_cached(url)
     _notify_tv_listeners()
 
@@ -2211,10 +2352,11 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 def build_tv_state_payload():
     url = normalize_url(app_state.get("url") or "")
     cached = _inspect_cache.get(url) or {}
-    info = active_sessions.get(current_session_id) or {}
+    active_tv_sid = tv_player_state.get("session_id") or current_session_id
+    info = active_sessions.get(active_tv_sid) or active_sessions.get(current_session_id) or {}
     stream_url = tv_player_state.get("stream_url") or ""
-    mp4_url = f"/stream.mp4?v={current_session_id}" if current_session_id and stream_url else ""
-    ts_url = f"/stream.ts?v={current_session_id}" if current_session_id and stream_url else ""
+    mp4_url = f"/stream.mp4?v={active_tv_sid}" if active_tv_sid and stream_url else ""
+    ts_url = f"/stream.ts?v={active_tv_sid}" if active_tv_sid and stream_url else ""
     opts = dict(app_state.get("opts") or {})
     if "speed" not in opts or not opts["speed"]:
         opts["speed"] = "1.0x"
@@ -2234,7 +2376,7 @@ def build_tv_state_payload():
         "stream_url": stream_url,
         "mp4_url": mp4_url,
         "ts_url": ts_url,
-        "session_id": current_session_id,
+        "session_id": active_tv_sid,
         "stream_offset": float(info.get("stream_offset") or 0),
         "is_active_download": bool(info.get("active")),
         "download_progress": app_state.get("download_progress", 0),
@@ -2372,6 +2514,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                         audio_idx=app_state.get("audio_index", 0),
                         episode=app_state.get("episode"),
                         translation_title=opts.get("translation_title"),
+                        seamless=True,
                     ),
                     daemon=True,
                 ).start()
@@ -2420,6 +2563,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                                 audio_idx=app_state.get("audio_index", 0),
                                 episode=app_state.get("episode"),
                                 translation_title=opts.get("translation_title"),
+                                seamless=True,
                             ),
                             daemon=True,
                         ).start()
@@ -2479,6 +2623,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                         audio_idx=0,
                         episode=app_state.get("episode"),
                         translation_title=tr_title,
+                        seamless=True,
                     ),
                     daemon=True,
                 ).start()
@@ -2504,6 +2649,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                         audio_idx=app_state.get("audio_index", 0),
                         episode=app_state.get("episode"),
                         translation_title=opts.get("translation_title"),
+                        seamless=True,
                     ),
                     daemon=True,
                 ).start()

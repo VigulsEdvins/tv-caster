@@ -383,16 +383,16 @@
       subVoice.textContent = data.translations && data.translations.length ? "Выбрать" : "По умолч.";
     }
 
-    if (data.is_active_download) {
-      overlayBufferInfo.textContent = `Буферизация: ${data.download_progress || 0}% (${data.download_speed || "0 MB/s"})`;
-    } else if (data.status === "playing") {
+    if (data.download_progress >= 100 || data.status === "playing") {
       overlayBufferInfo.textContent = "Загружено 100%";
+    } else if (data.is_active_download) {
+      overlayBufferInfo.textContent = `Буферизация: ${data.download_progress || 0}% (${data.download_speed || "0 MB/s"})`;
     } else {
       overlayBufferInfo.textContent = data.status_text || "";
     }
 
-    // Standby / Loading states
-    if (data.status === "preparing" || (data.status === "downloading" && !data.stream_url)) {
+    // Standby / Loading states (only show when no stream is currently playing on screen)
+    if (!currentSessionId && (data.status === "preparing" || (data.status === "downloading" && !data.stream_url))) {
       standbyScreen.classList.remove("hidden");
       standbyTitle.textContent = data.title || "Подготовка видео…";
       standbySubtitle.textContent = data.status_text || "Пожалуйста, подождите…";
