@@ -2,9 +2,129 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>TV Caster Player</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TV Caster — Android TV Player</title>
+  <link rel="stylesheet" href="/static/tv/tv_player.css">
 </head>
-<body>
-  <div id="app">TV Caster Android TV Player</div>
+<body class="browser-mode">
+  <!-- Video Surface -->
+  <div id="video-container">
+    <video id="tv-video" playsinline autoplay></video>
+  </div>
+
+  <!-- Standby / Buffering Screen -->
+  <div id="standby-screen" class="standby-screen">
+    <div class="standby-logo">
+      <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+        <polygon points="10 7 15 10 10 13 10 7" fill="#38bdf8"></polygon>
+        <line x1="8" y1="21" x2="16" y2="21"></line>
+        <line x1="12" y1="17" x2="12" y2="21"></line>
+      </svg>
+    </div>
+    <h1 id="standby-title" class="standby-title">TV Caster Ready</h1>
+    <p id="standby-subtitle" class="standby-subtitle">Выберите фильм или сериал на телефоне или компьютере и нажмите «Включить на ТВ».</p>
+
+    <div id="loading-box" class="loading-box">
+      <div class="loading-status-row">
+        <span id="loading-status-text">Подготовка видео…</span>
+        <span id="loading-speed-text">0 MB/s</span>
+      </div>
+      <div class="loading-bar-track">
+        <div id="loading-bar-fill" class="loading-bar-fill"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Center Action Toast -->
+  <div id="action-toast" class="action-toast">⏸ Пауза</div>
+
+  <!-- Player Overlay Bar (Docked Bottom or Top) -->
+  <div id="tv-overlay" class="tv-overlay dock-bottom">
+    <div class="overlay-header">
+      <div class="media-title-group">
+        <div id="overlay-title" class="media-title">Нет активного видео</div>
+        <div class="media-meta">
+          <span id="badge-episode" class="badge" style="display: none;">Серия</span>
+          <span id="badge-voice" class="badge" style="display: none;">Озвучка</span>
+          <span id="badge-quality" class="badge">720p</span>
+          <span id="badge-speed" class="badge">1.0x</span>
+          <span id="overlay-buffer-info">Готов к воспроизведению</span>
+        </div>
+      </div>
+      <div class="controls-group">
+        <button class="tv-btn focusable" data-row="0" data-action="toggle-dock" id="btn-dock">
+          <span>⇅ Панель:</span>
+          <span id="label-dock" class="btn-sub">Снизу</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Timeline Scrubber (Row 0 / 1) -->
+    <div id="timeline-scrubber" class="timeline-row focusable" tabindex="0" data-row="1" data-action="timeline">
+      <span id="time-current" class="time-label">00:00:00</span>
+      <div class="timeline-track" id="timeline-track">
+        <div id="timeline-buffer" class="timeline-buffer"></div>
+        <div id="timeline-progress" class="timeline-progress"></div>
+        <div id="timeline-thumb" class="timeline-thumb"></div>
+      </div>
+      <span id="time-duration" class="time-label">00:00:00</span>
+    </div>
+
+    <!-- Control Buttons (Row 2) -->
+    <div class="controls-row">
+      <div class="controls-group">
+        <button class="tv-btn primary-play focusable" data-row="2" data-action="toggle-play" id="btn-play">
+          <span id="play-icon">⏸</span>
+          <span id="play-label">Пауза</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="seek-back" id="btn-rew">
+          <span>⏪ -15с</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="seek-fwd" id="btn-ff">
+          <span>⏩ +15с</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="prev-ep" id="btn-prev-ep">
+          <span>⏮ Пред.</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="next-ep" id="btn-next-ep">
+          <span>След. ⏭</span>
+        </button>
+      </div>
+
+      <div class="controls-group">
+        <button class="tv-btn focusable" data-row="2" data-action="open-episodes" id="btn-episodes">
+          <span>🎬 Серии</span>
+          <span id="sub-episode" class="btn-sub">Выбрать</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="open-voices" id="btn-voices">
+          <span>🎙 Озвучка</span>
+          <span id="sub-voice" class="btn-sub">По умолч.</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="open-quality" id="btn-quality">
+          <span>📺 Качество</span>
+          <span id="sub-quality" class="btn-sub">720p</span>
+        </button>
+        <button class="tv-btn focusable" data-row="2" data-action="open-speed" id="btn-speed">
+          <span>⚡ Скорость</span>
+          <span id="sub-speed" class="btn-sub">1.0x</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Popover for Seasons/Episodes, Voice Acting, Quality, Speed -->
+  <div id="tv-modal-backdrop" class="tv-modal-backdrop">
+    <div class="tv-modal" id="tv-modal">
+      <div class="modal-header">
+        <h2 id="modal-title" class="modal-title">Выбор</h2>
+        <span class="modal-hint">Стрелки ◀ ▶ ▲ ▼ для выбора • OK применить • НАЗАД закрыть</span>
+      </div>
+      <div id="modal-season-tabs" class="season-tabs" style="display: none;"></div>
+      <div id="modal-options-grid" class="modal-options-grid"></div>
+    </div>
+  </div>
+
+  <script src="/static/tv/tv_player.js"></script>
 </body>
 </html>
