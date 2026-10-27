@@ -4,8 +4,6 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
-import android.media.MediaPlayer;
-import android.media.PlaybackParams;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,6 +11,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.SurfaceView;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -22,16 +21,36 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
-import android.widget.VideoView;
 
-public class MainActivity extends Activity implements MediaPlayer.OnPreparedListener, MediaPlayer.OnErrorListener, Runnable {
+import androidx.media3.common.C;
+import androidx.media3.common.Format;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.Player;
+import androidx.media3.common.TrackSelectionOverride;
+import androidx.media3.common.Tracks;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+public class MainActivity extends Activity implements Player.Listener, Runnable {
     private static final String DEFAULT_SERVER_URL = "http://192.168.1.116:8080/tv";
     private static final String PREFS_NAME = "tvcaster_prefs";
     private static final String KEY_SERVER_URL = "server_url";
 
-    VideoView videoView;
+    SurfaceView surfaceView;
     WebView webView;
-    MediaPlayer activeMediaPlayer;
+    ExoPlayer exoPlayer;
     Handler mainHandler;
     String loadedPageUrl = null;
     String activeStreamUrl = null;
@@ -39,21 +58,22 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
     volatile int cachedPositionSec = 0;
     volatile int cachedDurationSec = 0;
     volatile boolean cachedIsPlaying = false;
+    volatile String cachedAudioTracksJson = "[]";
     int pendingSeekSec = 0;
     float pendingSpeed = 1.0f;
 
     @Override
     public void run() {
         try {
-            if (videoView != null) {
-                cachedIsPlaying = videoView.isPlaying();
-                int posMs = videoView.getCurrentPosition();
-                int durMs = videoView.getDuration();
-                if (posMs > 0) {
-                    cachedPositionSec = posMs / 1000;
+            if (exoPlayer != null) {
+                cachedIsPlaying = exoPlayer.isPlaying();
+                long posMs = exoPlayer.getCurrentPosition();
+                long durMs = exoPlayer.getDuration();
+                if (posMs >= 0) {
+                    cachedPositionSec = (int) (posMs / 1000L);
                 }
-                if (durMs > 0) {
-                    cachedDurationSec = durMs / 1000;
+                if (durMs > 0 && durMs != C.TIME_UNSET) {
+                    cachedDurationSec = (int) (durMs / 1000L);
                 }
             }
         } catch (Exception ignored) {
@@ -64,30 +84,63 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
     }
 
     @Override
-    public void onPrepared(MediaPlayer mp) {
-        activeMediaPlayer = mp;
+    public void onPlaybackStateChanged(int playbackState) {
         try {
-            int durMs = mp.getDuration();
-            if (durMs > 0) {
-                cachedDurationSec = durMs / 1000;
-            }
-            mp.start();
-            cachedIsPlaying = true;
-            if (pendingSeekSec > 0) {
-                mp.seekTo(pendingSeekSec * 1000);
-                cachedPositionSec = pendingSeekSec;
-                pendingSeekSec = 0;
-            }
-            if (Math.abs(pendingSpeed - 1.0f) > 0.02f) {
-                applyPlaybackSpeed(pendingSpeed);
+            if (playbackState == Player.STATE_READY && exoPlayer != null) {
+                long durMs = exoPlayer.getDuration();
+                if (durMs > 0 && durMs != C.TIME_UNSET) {
+                    cachedDurationSec = (int) (durMs / 1000L);
+                }
+                if (pendingSeekSec > 0) {
+                    exoPlayer.seekTo(pendingSeekSec * 1000L);
+                    cachedPositionSec = pendingSeekSec;
+                    pendingSeekSec = 0;
+                }
+                if (Math.abs(pendingSpeed - 1.0f) > 0.02f) {
+                    applyPlaybackSpeed(pendingSpeed);
+                }
+                cachedIsPlaying = exoPlayer.isPlaying();
             }
         } catch (Exception ignored) {
         }
     }
 
     @Override
-    public boolean onError(MediaPlayer mp, int what, int extra) {
-        return true;
+    public void onTracksChanged(Tracks tracks) {
+        try {
+            JSONArray arr = new JSONArray();
+            List<Tracks.Group> groups = tracks.getGroups();
+            int audioIdx = 0;
+            for (int g = 0; g < groups.size(); g++) {
+                Tracks.Group group = groups.get(g);
+                if (group.getType() != C.TRACK_TYPE_AUDIO) {
+                    continue;
+                }
+                for (int t = 0; t < group.length; t++) {
+                    Format fmt = group.getTrackFormat(t);
+                    JSONObject obj = new JSONObject();
+                    obj.put("index", audioIdx);
+                    obj.put("lang", fmt.language != null ? fmt.language : "");
+                    obj.put("label", fmt.label != null ? fmt.label : ("Track " + (audioIdx + 1)));
+                    obj.put("codec", fmt.sampleMimeType != null ? fmt.sampleMimeType : "");
+                    obj.put("selected", group.isTrackSelected(t));
+                    arr.put(obj);
+                    audioIdx++;
+                }
+            }
+            cachedAudioTracksJson = arr.toString();
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    public void onPlayerError(PlaybackException error) {
+        try {
+            if (webView != null) {
+                webView.evaluateJavascript("if(window.onNativePlayerError)window.onNativePlayerError();", null);
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
@@ -104,15 +157,17 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
 
-        videoView = new VideoView(this);
+        surfaceView = new SurfaceView(this);
         FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER
         );
-        videoView.setLayoutParams(videoParams);
-        videoView.setOnPreparedListener(this);
-        videoView.setOnErrorListener(this);
+        surfaceView.setLayoutParams(videoParams);
+
+        exoPlayer = new ExoPlayer.Builder(this).build();
+        exoPlayer.setVideoSurfaceView(surfaceView);
+        exoPlayer.addListener(this);
 
         webView = new WebView(this);
         FrameLayout.LayoutParams webParams = new FrameLayout.LayoutParams(
@@ -135,7 +190,7 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         webView.setWebChromeClient(new WebChromeClient());
         webView.addJavascriptInterface(new AndroidBridge(this), "AndroidBridge");
 
-        root.addView(videoView);
+        root.addView(surfaceView);
         root.addView(webView);
         setContentView(root);
 
@@ -167,15 +222,99 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         }
     }
 
-    void applyPlaybackSpeed(float speed) {
-        pendingSpeed = speed;
-        if (activeMediaPlayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+    void startStreamInternal(String url, String headersJson, int startAtSec, float speed) {
+        if (url == null || exoPlayer == null) {
+            return;
+        }
+        if (url.equals(activeStreamUrl) && exoPlayer.isPlaying()) {
+            return;
+        }
+        activeStreamUrl = url;
+        pendingSeekSec = Math.max(0, startAtSec);
+        pendingSpeed = speed > 0 ? speed : 1.0f;
+        cachedPositionSec = pendingSeekSec;
+        cachedDurationSec = 0;
+        cachedAudioTracksJson = "[]";
+
+        Map<String, String> headersMap = new HashMap<String, String>();
+        String userAgent = "Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36";
+        if (headersJson != null && headersJson.length() > 2) {
             try {
-                PlaybackParams params = new PlaybackParams();
-                params.setSpeed(speed);
-                activeMediaPlayer.setPlaybackParams(params);
+                JSONObject obj = new JSONObject(headersJson);
+                Iterator<String> keys = obj.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    String v = obj.optString(k, "");
+                    if (v != null && v.length() > 0) {
+                        if ("user-agent".equalsIgnoreCase(k)) {
+                            userAgent = v;
+                        } else {
+                            headersMap.put(k, v);
+                        }
+                    }
+                }
             } catch (Exception ignored) {
             }
+        }
+
+        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+                .setUserAgent(userAgent)
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15000)
+                .setReadTimeoutMs(20000)
+                .setDefaultRequestProperties(headersMap);
+
+        DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(this)
+                .setDataSourceFactory(new DefaultDataSource.Factory(this, httpFactory));
+
+        MediaItem mediaItem = MediaItem.fromUri(Uri.parse(url));
+        exoPlayer.setMediaSource(mediaSourceFactory.createMediaSource(mediaItem));
+        if (pendingSeekSec > 0) {
+            exoPlayer.seekTo(pendingSeekSec * 1000L);
+        }
+        exoPlayer.setPlaybackParameters(new PlaybackParameters(pendingSpeed));
+        exoPlayer.prepare();
+        exoPlayer.setPlayWhenReady(true);
+        cachedIsPlaying = true;
+    }
+
+    void applyPlaybackSpeed(float speed) {
+        pendingSpeed = speed > 0 ? speed : 1.0f;
+        if (exoPlayer != null) {
+            try {
+                exoPlayer.setPlaybackParameters(new PlaybackParameters(pendingSpeed));
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    void selectAudioTrackInternal(int targetIndex) {
+        if (exoPlayer == null) {
+            return;
+        }
+        try {
+            Tracks tracks = exoPlayer.getCurrentTracks();
+            List<Tracks.Group> groups = tracks.getGroups();
+            int currentIdx = 0;
+            for (int g = 0; g < groups.size(); g++) {
+                Tracks.Group group = groups.get(g);
+                if (group.getType() != C.TRACK_TYPE_AUDIO) {
+                    continue;
+                }
+                for (int t = 0; t < group.length; t++) {
+                    if (currentIdx == targetIndex) {
+                        exoPlayer.setTrackSelectionParameters(
+                                exoPlayer.getTrackSelectionParameters()
+                                        .buildUpon()
+                                        .setOverrideForType(new TrackSelectionOverride(group.getMediaTrackGroup(), t))
+                                        .build()
+                        );
+                        return;
+                    }
+                    currentIdx++;
+                }
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -229,6 +368,13 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         if (mainHandler != null) {
             mainHandler.removeCallbacks(this);
         }
+        if (exoPlayer != null) {
+            try {
+                exoPlayer.release();
+            } catch (Exception ignored) {
+            }
+            exoPlayer = null;
+        }
         super.onDestroy();
     }
 
@@ -236,13 +382,15 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         private final MainActivity act;
         private final int cmd;
         private final String url;
+        private final String headersJson;
         private final int intVal;
         private final float floatVal;
 
-        BridgeTask(MainActivity act, int cmd, String url, int intVal, float floatVal) {
+        BridgeTask(MainActivity act, int cmd, String url, String headersJson, int intVal, float floatVal) {
             this.act = act;
             this.cmd = cmd;
             this.url = url;
+            this.headersJson = headersJson;
             this.intVal = intVal;
             this.floatVal = floatVal;
         }
@@ -250,37 +398,35 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         @Override
         public void run() {
             try {
-                if (cmd == 1) { // loadStream
-                    if (url != null && url.equals(act.activeStreamUrl) && act.videoView.isPlaying()) {
-                        return;
-                    }
-                    act.activeStreamUrl = url;
-                    act.pendingSeekSec = Math.max(0, intVal);
-                    act.pendingSpeed = floatVal > 0 ? floatVal : 1.0f;
-                    act.cachedPositionSec = act.pendingSeekSec;
-                    act.cachedDurationSec = 0;
-                    act.videoView.setVideoURI(Uri.parse(url));
+                if (cmd == 1) { // loadStream / loadStreamWithHeaders
+                    act.startStreamInternal(url, headersJson, intVal, floatVal);
                 } else if (cmd == 2) { // play
-                    act.videoView.start();
+                    if (act.exoPlayer != null) {
+                        act.exoPlayer.play();
+                    }
                     act.cachedIsPlaying = true;
                 } else if (cmd == 3) { // pause
-                    act.videoView.pause();
+                    if (act.exoPlayer != null) {
+                        act.exoPlayer.pause();
+                    }
                     act.cachedIsPlaying = false;
                 } else if (cmd == 4) { // stop
                     act.activeStreamUrl = null;
-                    act.videoView.stopPlayback();
+                    if (act.exoPlayer != null) {
+                        act.exoPlayer.stop();
+                    }
                     act.cachedIsPlaying = false;
                     act.cachedPositionSec = 0;
                 } else if (cmd == 5) { // seekTo
                     int clamped = Math.max(0, intVal);
                     act.cachedPositionSec = clamped;
-                    if (act.activeMediaPlayer != null) {
-                        act.activeMediaPlayer.seekTo(clamped * 1000);
-                    } else {
-                        act.videoView.seekTo(clamped * 1000);
+                    if (act.exoPlayer != null) {
+                        act.exoPlayer.seekTo(clamped * 1000L);
                     }
                 } else if (cmd == 6) { // setSpeed
                     act.applyPlaybackSpeed(floatVal);
+                } else if (cmd == 7) { // selectAudioTrack
+                    act.selectAudioTrackInternal(intVal);
                 }
             } catch (Exception ignored) {
             }
@@ -296,32 +442,37 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
 
         @JavascriptInterface
         public void loadStream(String url, int startAtSec, float speed) {
-            act.mainHandler.post(new BridgeTask(act, 1, url, startAtSec, speed));
+            act.mainHandler.post(new BridgeTask(act, 1, url, null, startAtSec, speed));
+        }
+
+        @JavascriptInterface
+        public void loadStreamWithHeaders(String url, String headersJson, int startAtSec, float speed) {
+            act.mainHandler.post(new BridgeTask(act, 1, url, headersJson, startAtSec, speed));
         }
 
         @JavascriptInterface
         public void play() {
-            act.mainHandler.post(new BridgeTask(act, 2, null, 0, 1.0f));
+            act.mainHandler.post(new BridgeTask(act, 2, null, null, 0, 1.0f));
         }
 
         @JavascriptInterface
         public void pause() {
-            act.mainHandler.post(new BridgeTask(act, 3, null, 0, 1.0f));
+            act.mainHandler.post(new BridgeTask(act, 3, null, null, 0, 1.0f));
         }
 
         @JavascriptInterface
         public void stop() {
-            act.mainHandler.post(new BridgeTask(act, 4, null, 0, 1.0f));
+            act.mainHandler.post(new BridgeTask(act, 4, null, null, 0, 1.0f));
         }
 
         @JavascriptInterface
         public void seekTo(int sec) {
-            act.mainHandler.post(new BridgeTask(act, 5, null, sec, 1.0f));
+            act.mainHandler.post(new BridgeTask(act, 5, null, null, sec, 1.0f));
         }
 
         @JavascriptInterface
         public void setSpeed(float speed) {
-            act.mainHandler.post(new BridgeTask(act, 6, null, 0, speed));
+            act.mainHandler.post(new BridgeTask(act, 6, null, null, 0, speed));
         }
 
         @JavascriptInterface
@@ -337,6 +488,16 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         @JavascriptInterface
         public boolean isPlaying() {
             return act.cachedIsPlaying;
+        }
+
+        @JavascriptInterface
+        public String getAudioTracks() {
+            return act.cachedAudioTracksJson;
+        }
+
+        @JavascriptInterface
+        public void selectAudioTrack(int index) {
+            act.mainHandler.post(new BridgeTask(act, 7, null, null, index, 1.0f));
         }
     }
 }

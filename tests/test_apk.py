@@ -32,6 +32,12 @@ class TestAndroidTVApk(unittest.TestCase):
         self.assertIn("AndroidBridge", content)
         self.assertIn("WebView", content)
         self.assertIn("FLAG_KEEP_SCREEN_ON", content)
+        self.assertIn("ExoPlayer", content)
+        self.assertIn("DefaultHttpDataSource", content)
+        self.assertIn("SurfaceView", content)
+        self.assertIn("loadStreamWithHeaders", content)
+        self.assertIn("getAudioTracks", content)
+        self.assertIn("selectAudioTrack", content)
 
     def test_compiled_apk_valid_and_served(self):
         apk_path = os.path.join(ROOT_DIR, "static", "tv-caster-player.apk")
