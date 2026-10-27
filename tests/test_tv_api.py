@@ -94,6 +94,53 @@ class TestTVApi(unittest.TestCase):
         data = json.loads(body)
         self.assertEqual(data.get("last_command", {}).get("type"), "pause")
 
+    def test_is_replay_lsm(self):
+        self.assertTrue(server.is_replay_lsm("https://replay.lsm.lv/lv/skaties/tiesraide/ltv7/merdoka-noslepumi-9-detektivserials-originalvalodas-izvele"))
+        self.assertTrue(server.is_replay_lsm("https://replay.lsm.lv/lv/skaties/tiesraide/ltv1"))
+        self.assertTrue(server.is_replay_lsm("https://ltv.lsm.lv/embed/live?c=123"))
+        self.assertFalse(server.is_replay_lsm("https://youtube.com/watch?v=123"))
+
+    def test_inspect_lsm_url(self):
+        url = "https://replay.lsm.lv/lv/skaties/tiesraide/ltv7/merdoka-noslepumi-9-detektivserials-originalvalodas-izvele"
+        info = server.inspect_url(url)
+        self.assertTrue(info.get("ok"))
+        self.assertIn("Mērdoka noslēpumi", info.get("title", ""))
+        self.assertEqual(info.get("kind"), "live")
+        self.assertTrue(len(info.get("translations", [])) >= 2)
+        # Verify original language is prioritized when requested in URL
+        self.assertEqual(info.get("selected_translation"), "fra")
+
+    def test_lsm_master_playlist_endpoint(self):
+        sample_raw = """#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="mp4a",DEFAULT="YES",NAME="lav-mp4a",LANGUAGE="lav",URI="audio1.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="mp4a",DEFAULT="NO",NAME="fra-mp4a",LANGUAGE="fra",URI="audio2.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1280x720,AUDIO="mp4a"
+video720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5500000,RESOLUTION=1920x1080,AUDIO="mp4a"
+video1080.m3u8
+"""
+        sid = 9999
+        server._lsm_sessions[sid] = {
+            "master_url": "https://cdn.example.com/live/playlist.m3u8",
+            "final_master_url": "https://cdn.example.com/live/playlist.m3u8",
+            "raw_playlist": sample_raw,
+            "chosen_lang": "fra",
+            "quality": "720p",
+            "is_live": True,
+            "title": "Test LSM Stream",
+            "fetched_at": time.time(),
+        }
+        status, body, ctype = self._get(f"/lsm/master.m3u8?s={sid}&lang=fra&q=720p")
+        self.assertEqual(status, 200)
+        self.assertIn("application/vnd.apple.mpegurl", ctype)
+        self.assertIn("DEFAULT=YES,NAME=\"fra-mp4a\"", body)
+        self.assertIn("DEFAULT=NO,NAME=\"lav-mp4a\"", body)
+        self.assertIn("https://cdn.example.com/live/audio2.m3u8", body)
+        # Verify 720p is listed before 1080p
+        idx_720 = body.find("1280x720")
+        idx_1080 = body.find("1920x1080")
+        self.assertLess(idx_720, idx_1080)
+
 
 if __name__ == "__main__":
     unittest.main()

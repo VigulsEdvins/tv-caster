@@ -181,9 +181,10 @@
     isPaused = false;
 
     if (hasNativeBridge) {
-      let fullTsUrl = window.location.origin + (stateObj.ts_url || `/stream.ts?v=${sid}`);
+      const rawTs = stateObj.ts_url || `/stream.ts?v=${sid}`;
+      let fullTsUrl = (rawTs.startsWith("http://") || rawTs.startsWith("https://")) ? rawTs : window.location.origin + rawTs;
       if (forceReload) {
-        fullTsUrl += `&r=${Date.now()}`;
+        fullTsUrl += (fullTsUrl.includes("?") ? "&" : "?") + `r=${Date.now()}`;
       }
       window.AndroidBridge.loadStream(fullTsUrl, relSeek, 1.0);
     } else {
