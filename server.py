@@ -537,6 +537,7 @@ def tv_get_volume():
 def tv_cast_url(stream_url, title="Media Stream"):
     info = active_sessions.get(current_session_id) or {}
     start_pos = float(info.get("start_at") or 0)
+    stream_offset = float(info.get("stream_offset") or 0)
     tv_player_state["stream_url"] = stream_url
     tv_player_state["title"] = title
     tv_player_state["session_id"] = current_session_id
@@ -547,6 +548,7 @@ def tv_cast_url(stream_url, title="Media Stream"):
         "title": title,
         "session_id": current_session_id,
         "start_at": start_pos,
+        "stream_offset": stream_offset,
         "speed": (app_state.get("opts") or {}).get("speed", "1.0x"),
     })
     if tv_player_state.get("use_custom_player", True):
@@ -1044,7 +1046,7 @@ def inspect_url(url):
             "kind": data.get("kind", "movie"),
             "seasons": data.get("seasons", []),
             "translations": data.get("translations", []),
-            "qualities": ["720p", "1080p", "480p", "360p"],
+            "qualities": ["1080p", "720p", "480p", "360p"],
             "speeds": speeds
         }
     elif is_rezka(url) and REZKA_URL_RE.match(url):
@@ -1053,7 +1055,7 @@ def inspect_url(url):
         res = {
             "ok": True, "title": data["title"], "kind": "series", "seasons": data["seasons"],
             "translations": data.get("translations", []),
-            "qualities": ["720p", "1080p", "480p", "360p"], "speeds": speeds,
+            "qualities": ["1080p", "720p", "480p", "360p"], "speeds": speeds,
         }
     elif "tulsa-king.net" in url or "rezka" in url:
         title, chosen, qualities = extract_rezka(url)
@@ -1062,7 +1064,7 @@ def inspect_url(url):
             "title": title,
             "seasons": [],
             "translations": [],
-            "qualities": qualities or ["720p", "1080p", "480p", "360p"],
+            "qualities": ["1080p", "720p", "480p", "360p"],
             "speeds": speeds
         }
     else:
@@ -1071,7 +1073,7 @@ def inspect_url(url):
             "title": "Online Video",
             "seasons": [],
             "translations": [],
-            "qualities": ["720p", "1080p", "480p"],
+            "qualities": ["1080p", "720p", "480p"],
             "speeds": speeds
         }
     _inspect_cache[url] = res
@@ -1095,8 +1097,6 @@ def ensure_media_info_cached(url):
     threading.Thread(target=_bg, daemon=True).start()
 
 def apply_speed_to_chunk(chunk_bytes, speed_str):
-    if tv_player_state.get("use_custom_player", True):
-        return chunk_bytes
     if not speed_str or speed_str in ("1.0x", "1.0", "1"):
         return chunk_bytes
     try:
@@ -1730,13 +1730,47 @@ def moov_in_head(head):
         pos += size
     return False
 
-def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
-    """Pipe a 'fast start' MP4 through ffmpeg into the growing session file; the TV starts after a few MB."""
+def _start_range_proxy(target_url, cancel_event, on_bytes):
+    """Run an ephemeral localhost HTTP proxy that forwards Range requests over HTTPS via urllib."""
+    class RangeProxyHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            hdrs = dict(DL_HEADERS)
+            if "Range" in self.headers:
+                hdrs["Range"] = self.headers["Range"]
+            try:
+                req = urllib.request.Request(target_url, headers=hdrs)
+                with urlopen_fast(req) as r:
+                    self.send_response(r.status)
+                    for k in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+                        if r.headers.get(k):
+                            self.send_header(k, r.headers.get(k))
+                    self.end_headers()
+                    while not cancel_event.is_set():
+                        buf = r.read(256 * 1024)
+                        if not buf:
+                            break
+                        self.wfile.write(buf)
+                        on_bytes(len(buf))
+            except Exception:
+                pass
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RangeProxyHandler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{port}/video.mp4"
+
+
+def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=0):
+    """Pipe a 'fast start' MP4 through ffmpeg into the growing session file; supports live seek and speed."""
     info = active_sessions.get(session_id)
     if not info:
         return
     cancel_event = info["cancel_event"]
-    resp = proc = None
+    resp = proc = proxy_httpd = None
     try:
         if session_id == current_session_id:
             app_state.update(status="downloading", stage="download", status_text="Загружаю видео", title=title, download_progress=0)
@@ -1745,6 +1779,7 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
         head = resp.read(4 * 1024 * 1024)
         if not moov_in_head(head):
             resp.close()
+            resp = None
             return download_dash(session_id, title, [url], speed, audio_idx)
 
         audios = [x for x in probe_streams(data=head) if x["type"] == "Audio"]
@@ -1753,36 +1788,90 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
             tv_player_state["duration"] = probed_dur
         if not (0 <= audio_idx < len(audios)):
             audio_idx = 0
-        convert_audio = bool(audios) and audios[audio_idx]["codec"] not in SAFE_AUDIO
-        cmd = [get_ffmpeg(), "-y", "-nostdin", "-loglevel", "error", "-i", "pipe:0", "-map", "0:v:0"]
-        cmd += ["-map", f"0:a:{audio_idx}"] if audios else []
-        cmd += ["-c:v", "copy"] + (["-c:a", "aac", "-ac", "2", "-b:a", "192k"] if convert_audio else ["-c:a", "copy"])
-        cmd += ["-f", "mpegts", info["file"]]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        rate = 1.0
+        if speed and speed not in ("1.0x", "1.0", "1"):
+            try:
+                rate = float(str(speed).replace("x", "").strip())
+            except Exception:
+                rate = 1.0
+
+        seek_sec = max(0, int(start_at or 0))
+        if probed_dur > 0 and seek_sec >= probed_dur - 5:
+            seek_sec = 0
 
         fed = [0]
         start_time = time.time()
 
-        def feed():
-            try:
-                proc.stdin.write(head)
-                fed[0] += len(head)
-                while not cancel_event.is_set():
-                    buf = resp.read(256 * 1024)
-                    if not buf:
-                        break
-                    proc.stdin.write(buf)
-                    fed[0] += len(buf)
-            except (BrokenPipeError, OSError, ValueError):
-                pass
-            finally:
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
-        feeder = threading.Thread(target=feed, daemon=True)
-        feeder.start()
+        def on_proxy_bytes(n):
+            fed[0] += n
 
+        convert_audio = bool(audios) and audios[audio_idx]["codec"] not in SAFE_AUDIO
+        cmd = [get_ffmpeg(), "-y", "-nostdin", "-loglevel", "error"]
+
+        use_proxy = seek_sec > 0
+        if use_proxy:
+            resp.close()
+            resp = None
+            info["stream_offset"] = float(seek_sec)
+            info["resumed"] = True
+            proxy_httpd, proxy_url = _start_range_proxy(url, cancel_event, on_proxy_bytes)
+            cmd += ["-ss", str(seek_sec), "-i", proxy_url]
+        else:
+            info["stream_offset"] = 0.0
+            cmd += ["-i", "pipe:0"]
+
+        if abs(rate - 1.0) > 0.02:
+            pts_factor = round(1.0 / rate, 4)
+            if audios:
+                cmd += [
+                    "-filter_complex", f"[0:v:0]setpts={pts_factor}*PTS[v];[0:a:{audio_idx}]atempo={rate}[a]",
+                    "-map", "[v]", "-map", "[a]",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+                    "-c:a", "aac", "-ac", "2", "-b:a", "192k",
+                ]
+            else:
+                cmd += [
+                    "-filter_complex", f"[0:v:0]setpts={pts_factor}*PTS[v]",
+                    "-map", "[v]",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+                ]
+        else:
+            cmd += ["-map", "0:v:0"]
+            cmd += ["-map", f"0:a:{audio_idx}"] if audios else []
+            cmd += ["-c:v", "copy"] + (["-c:a", "aac", "-ac", "2", "-b:a", "192k"] if convert_audio else ["-c:a", "copy"])
+
+        cmd += ["-f", "mpegts", info["file"]]
+        proc = subprocess.Popen(
+            cmd,
+            stdin=None if use_proxy else subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        feeder = None
+        if not use_proxy:
+            def feed():
+                try:
+                    proc.stdin.write(head)
+                    fed[0] += len(head)
+                    while not cancel_event.is_set():
+                        buf = resp.read(256 * 1024)
+                        if not buf:
+                            break
+                        proc.stdin.write(buf)
+                        fed[0] += len(buf)
+                except (BrokenPipeError, OSError, ValueError):
+                    pass
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+            feeder = threading.Thread(target=feed, daemon=True)
+            feeder.start()
+
+        start_threshold = 1536 * 1024 if (use_proxy or abs(rate - 1.0) > 0.02) else 2 * 1024 * 1024
         cast_triggered = False
         local_stream_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
         while proc.poll() is None:
@@ -1795,20 +1884,21 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
                 app_state["total_size"] = f"{fed[0] / 1048576:.0f} MB"
                 if total:
                     app_state["download_progress"] = min(99, int(fed[0] * 100 / total))
-            if not cast_triggered and os.path.exists(info["file"]) and os.path.getsize(info["file"]) >= LIVE_START_BYTES:
+            if not cast_triggered and os.path.exists(info["file"]) and os.path.getsize(info["file"]) >= start_threshold:
                 cast_triggered = True
                 if session_id == current_session_id:
                     app_state.update(stage="tv", status_text="Играет на ТВ, догружаю")
                 tv_cast_url(local_stream_url, title)
-            time.sleep(0.25)
+            time.sleep(0.2)
 
-        feeder.join(5)
+        if feeder:
+            feeder.join(5)
         if cancel_event.is_set():
             return
         if proc.returncode != 0:
             tail = proc.stderr.read().decode("utf-8", errors="ignore").strip().splitlines()[-1:] or [""]
             raise Exception("FFmpeg failed: " + tail[0])
-        if total and fed[0] < total:
+        if not use_proxy and total and fed[0] < total:
             raise Exception(f"timed out: download interrupted at {fed[0] * 100 // total}%")
         info["active"] = False
         if not cast_triggered:
@@ -1831,17 +1921,20 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
     finally:
         if proc and proc.poll() is None:
             proc.kill()
+        if proxy_httpd:
+            try:
+                proxy_httpd.shutdown()
+                proxy_httpd.server_close()
+            except Exception:
+                pass
         if resp:
             try:
                 resp.close()
             except Exception:
                 pass
 
-def download_and_stream_mp4(session_id, title, mp4_url, speed="1.0x", audio_idx=0):
-    if speed in ("1.0x", "1.0", "1", None):
-        stream_mp4_live(session_id, title, mp4_url, speed, audio_idx)
-    else:
-        download_dash(session_id, title, [mp4_url], speed, audio_idx)
+def download_and_stream_mp4(session_id, title, mp4_url, speed="1.0x", audio_idx=0, start_at=0):
+    stream_mp4_live(session_id, title, mp4_url, speed, audio_idx, start_at=start_at)
 
 def ytdlp_streams(url, quality):
     """One yt-dlp call: returns (title, [direct media URLs]) preferring H.264 video + AAC audio."""
@@ -1882,7 +1975,7 @@ def resume_seek(session_id, start_at):
     while time.time() < deadline:
         time.sleep(1.5)
         info = active_sessions.get(session_id)
-        if session_id != current_session_id or not info or info["cancel_event"].is_set():
+        if session_id != current_session_id or not info or info["cancel_event"].is_set() or info.get("resumed"):
             return
         if info.get("active"):
             continue
@@ -1971,7 +2064,7 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             if speed and speed != "1.0x":
                 title += f" ({speed})"
             remember(title)
-            threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx), daemon=True).start()
+            threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
         elif url.startswith("magnet:"):
             torr_data = json.dumps({"action": "add", "link": url, "save_to_db": True}).encode("utf-8")
             req = urllib.request.Request(f"http://{TV['ip']}:8090/torrents", data=torr_data, headers={"Content-Type": "application/json"})
@@ -2020,7 +2113,7 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                 if ".m3u8" in direct_url:
                     threading.Thread(target=download_and_stream_hls, args=(session_id, title, direct_url, None, speed, quality), daemon=True).start()
                 else:
-                    threading.Thread(target=download_and_stream_mp4, args=(session_id, title, direct_url, speed, audio_idx), daemon=True).start()
+                    threading.Thread(target=download_and_stream_mp4, args=(session_id, title, direct_url, speed, audio_idx, start_at), daemon=True).start()
             elif re.search(r'\.(mp4|m3u8|mkv|webm|ts|mov)(\?|$)', url, re.I):
                 tv_cast_url(url, "Web Stream")
                 info["active"] = False
@@ -2142,6 +2235,7 @@ def build_tv_state_payload():
         "mp4_url": mp4_url,
         "ts_url": ts_url,
         "session_id": current_session_id,
+        "stream_offset": float(info.get("stream_offset") or 0),
         "is_active_download": bool(info.get("active")),
         "download_progress": app_state.get("download_progress", 0),
         "download_speed": app_state.get("download_speed", "0 MB/s"),
@@ -2263,7 +2357,24 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             if action == "set_speed":
                 spd = data.get("speed", "1.0x")
                 opts["speed"] = spd
-                _issue_tv_command("speed", target=spd)
+                if not url:
+                    _issue_tv_command("speed", target=spd)
+                    self.send_json({"ok": True, "speed": spd})
+                    return
+                threading.Thread(
+                    target=handle_cast_request,
+                    kwargs=dict(
+                        url=url,
+                        translation_id=opts.get("translation_id"),
+                        quality=opts.get("quality", "720p"),
+                        speed=spd,
+                        start_at=cur_pos,
+                        audio_idx=app_state.get("audio_index", 0),
+                        episode=app_state.get("episode"),
+                        translation_title=opts.get("translation_title"),
+                    ),
+                    daemon=True,
+                ).start()
                 self.send_json({"ok": True, "speed": spd})
             elif action == "play":
                 tv_play()
@@ -2278,8 +2389,43 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                     tv_play()
                 self.send_json({"ok": True, "state": tv_player_state.get("state")})
             elif action == "seek":
-                tv_seek(data.get("target", 0))
-                self.send_json({"ok": True, "position": tv_player_state.get("position")})
+                target_raw = data.get("target", 0)
+                target_sec = hms_to_sec(target_raw) if isinstance(target_raw, str) and ":" in target_raw else int(float(target_raw or 0))
+                target_sec = max(0, target_sec)
+                from_tv = bool(data.get("from_tv"))
+                info = active_sessions.get(current_session_id) or {}
+                spd = opts.get("speed", "1.0x")
+                stream_offset = float(info.get("stream_offset") or 0)
+                if from_tv and url:
+                    if not info.get("active") and spd in ("1.0x", "1.0", "1") and target_sec >= stream_offset and os.path.exists(info.get("file", "")):
+                        tv_player_state["position"] = float(target_sec)
+                        _issue_tv_command("load", target={
+                            "url": tv_player_state.get("stream_url") or f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={current_session_id}",
+                            "title": app_state.get("title") or tv_player_state.get("title"),
+                            "session_id": current_session_id,
+                            "start_at": float(target_sec),
+                            "stream_offset": stream_offset,
+                            "speed": spd,
+                            "reload": True,
+                        })
+                    else:
+                        threading.Thread(
+                            target=handle_cast_request,
+                            kwargs=dict(
+                                url=url,
+                                translation_id=opts.get("translation_id"),
+                                quality=opts.get("quality", "720p"),
+                                speed=spd,
+                                start_at=target_sec,
+                                audio_idx=app_state.get("audio_index", 0),
+                                episode=app_state.get("episode"),
+                                translation_title=opts.get("translation_title"),
+                            ),
+                            daemon=True,
+                        ).start()
+                else:
+                    tv_seek(target_sec)
+                self.send_json({"ok": True, "position": float(target_sec)})
             elif action == "volume":
                 tv_set_volume(data.get("value", 80))
                 self.send_json({"ok": True, "volume": tv_player_state.get("volume")})
@@ -2317,6 +2463,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             elif action == "switch_translation":
                 tr_id = data.get("translation_id")
                 tr_title = data.get("translation_title")
+                opts["translation_id"] = tr_id
+                opts["translation_title"] = tr_title
                 if not url:
                     self.send_json({"ok": False, "error": "No active media URL"})
                     return
@@ -2341,8 +2489,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": ok, "error": err})
             elif action == "switch_quality":
                 qual = data.get("quality", "720p")
+                opts["quality"] = qual
                 if not url:
-                    opts["quality"] = qual
                     self.send_json({"ok": True, "quality": qual})
                     return
                 threading.Thread(

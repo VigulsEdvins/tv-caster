@@ -71,12 +71,13 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
             if (durMs > 0) {
                 cachedDurationSec = durMs / 1000;
             }
-            if (pendingSeekSec > 0) {
-                mp.seekTo(pendingSeekSec * 1000);
-                pendingSeekSec = 0;
-            }
             mp.start();
             cachedIsPlaying = true;
+            if (pendingSeekSec > 0) {
+                mp.seekTo(pendingSeekSec * 1000);
+                cachedPositionSec = pendingSeekSec;
+                pendingSeekSec = 0;
+            }
             if (Math.abs(pendingSpeed - 1.0f) > 0.02f) {
                 applyPlaybackSpeed(pendingSpeed);
             }
@@ -178,19 +179,47 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         }
     }
 
+    private static String mapKeyCode(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                return "UP";
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return "DOWN";
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                return "LEFT";
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return "RIGHT";
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                return "ENTER";
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                return "BACK";
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+            case KeyEvent.KEYCODE_MEDIA_PLAY:
+            case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                return "PLAY_PAUSE";
+            case KeyEvent.KEYCODE_MEDIA_REWIND:
+                return "REWIND";
+            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+                return "FF";
+            default:
+                return null;
+        }
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+        String mapped = mapKeyCode(event.getKeyCode());
+        if (mapped != null) {
             if (event.getAction() == KeyEvent.ACTION_DOWN && webView != null) {
-                webView.evaluateJavascript(
-                        "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', keyCode: 27}));",
-                        null
-                );
+                boolean isNonRepeatable = "ENTER".equals(mapped) || "BACK".equals(mapped) || "PLAY_PAUSE".equals(mapped);
+                if (!isNonRepeatable || event.getRepeatCount() == 0) {
+                    webView.evaluateJavascript("if(window.onTvKey)window.onTvKey('" + mapped + "');", null);
+                }
             }
             return true;
-        }
-        if (webView != null) {
-            return webView.dispatchKeyEvent(event);
         }
         return super.dispatchKeyEvent(event);
     }
