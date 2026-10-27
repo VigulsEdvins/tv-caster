@@ -1,0 +1,14 @@
+{
+  "ip": "192.168.1.105",
+  "name": "MediaCenter-108a08f5",
+  "controls": {
+    "RenderingControl": {
+      "url": "http://192.168.1.105:38388/serviceControl/RenderingControl",
+      "type": "urn:schemas-upnp-org:service:RenderingControl:1"
+    },
+    "AVTransport": {
+      "url": "http://192.168.1.105:38388/serviceControl/AVTransport",
+      "type": "urn:schemas-upnp-org:service:AVTransport:1"
+    }
+  }
+}

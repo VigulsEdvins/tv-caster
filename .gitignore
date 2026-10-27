@@ -1,0 +1,16 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Media cache & large files
+media_cache/
+*.ts
+*.mp4
+*.mkv
+
+# Databases & local state
+*.db
+.claude-flow/
+.swarm/
+history.json

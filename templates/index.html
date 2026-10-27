@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1120">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="TV Caster">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <title>TV Caster Hub</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --card-bg: rgba(30, 41, 59, 0.7);
+      --border: rgba(255, 255, 255, 0.1);
+      --primary: #38bdf8;
+      --accent: #818cf8;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #34d399;
+      --warn: #fbbf24;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    body {
+      background: radial-gradient(circle at top, #1e293b, var(--bg)) fixed;
+      color: var(--text);
+      min-height: 100vh;
+      padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { width: 100%; max-width: 680px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; gap: 12px; }
+    .title-group h1 {
+      font-size: 1.6rem; font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .tv-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 14px; min-height: 40px; border-radius: 9999px;
+      background: rgba(52, 211, 153, 0.15); border: 1px solid rgba(52, 211, 153, 0.3);
+      color: var(--success); font-size: 0.82rem; font-weight: 600; cursor: pointer;
+      max-width: 55%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tv-badge.offline { background: rgba(248, 113, 113, 0.15); border-color: rgba(248, 113, 113, 0.4); color: var(--danger); }
+    .tv-dot { flex: none; width: 8px; height: 8px; background: currentColor; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+
+    .card {
+      background: var(--card-bg); backdrop-filter: blur(14px);
+      border: 1px solid var(--border); border-radius: 16px;
+      padding: 24px; margin-bottom: 20px;
+      box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.3);
+    }
+    @media (max-width: 480px) { .card { padding: 18px; } }
+
+    .input-group { display: flex; flex-direction: column; gap: 12px; }
+    .input-label { font-size: 0.9rem; font-weight: 600; }
+    .url-input, .search-input {
+      width: 100%; padding: 14px 16px; border-radius: 12px;
+      background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border);
+      color: #fff; font-size: 1rem; outline: none; transition: all 0.2s;
+    }
+    .url-input:focus, .search-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25); }
+    .btn {
+      padding: 14px 20px; min-height: 48px; border-radius: 12px; border: none;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer;
+      display: flex; justify-content: center; align-items: center; gap: 8px;
+      transition: transform 0.15s, opacity 0.2s; touch-action: manipulation;
+    }
+    .btn:hover { opacity: 0.92; }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary { background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border); color: var(--text); }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.14); }
+    .btn-danger { background: rgba(248, 113, 113, 0.2); border: 1px solid var(--danger); color: var(--danger); }
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn-small { padding: 8px 12px; min-height: 36px; font-size: 0.82rem; border-radius: 9px; }
+
+    /* Status banner */
+    .status-banner {
+      margin-top: 14px; padding: 14px 16px; border-radius: 10px;
+      background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3);
+      color: var(--primary); font-size: 0.88rem; display: none; flex-direction: column; gap: 10px;
+    }
+    .status-banner.error { background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.4); color: var(--danger); }
+    .status-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-weight: 600; }
+    .status-meta { font-weight: 500; font-size: 0.8rem; opacity: 0.9; white-space: nowrap; }
+    .status-hint { color: var(--text-muted); font-size: 0.82rem; line-height: 1.4; }
+    .status-actions { display: flex; gap: 8px; }
+    .steps { display: flex; gap: 6px; }
+    .step { flex: 1; text-align: center; font-size: 0.7rem; font-weight: 600; letter-spacing: .3px; padding-top: 6px; border-top: 3px solid rgba(255,255,255,.15); color: var(--text-muted); }
+    .step.done { border-color: var(--success); color: var(--success); }
+    .step.active { border-color: var(--primary); color: var(--primary); }
+    .dl-progress-bar { width: 100%; height: 6px; background: rgba(255, 255, 255, 0.15); border-radius: 3px; overflow: hidden; }
+    .dl-progress-fill { height: 100%; width: 0%; background: var(--primary); border-radius: 3px; transition: width 0.3s ease; }
+
+    /* Player */
+    .player-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+    .player-title { font-size: 1.12rem; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+    .player-state { flex: none; font-size: 0.72rem; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .state-PLAYING { background: rgba(52, 211, 153, 0.2); color: var(--success); border: 1px solid var(--success); }
+    .state-PAUSED, .state-PAUSED_PLAYBACK { background: rgba(251, 191, 36, 0.2); color: var(--warn); border: 1px solid var(--warn); }
+    .state-STOPPED, .state-NO_MEDIA_PRESENT { background: rgba(148, 163, 184, 0.2); color: var(--text-muted); border: 1px solid var(--text-muted); }
+    .state-TRANSITIONING { background: rgba(56, 189, 248, 0.2); color: var(--primary); border: 1px solid var(--primary); }
+
+    .seek-wrap { position: relative; height: 32px; margin: 10px 0 2px; }
+    .seek-track, .seek-buffer, .seek-fill { position: absolute; left: 0; top: 12px; height: 8px; border-radius: 4px; pointer-events: none; }
+    .seek-track { width: 100%; background: rgba(255, 255, 255, 0.1); }
+    .seek-buffer { width: 0; background: rgba(255, 255, 255, 0.22); transition: width .3s; }
+    .seek-fill { width: 0; background: linear-gradient(90deg, var(--primary), var(--accent)); }
+    .seek {
+      position: absolute; inset: 0; width: 100%; height: 32px; margin: 0;
+      -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; touch-action: none;
+    }
+    .seek::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 4px rgba(56,189,248,.35); }
+    .seek::-moz-range-thumb { width: 20px; height: 20px; border: none; border-radius: 50%; background: #fff; box-shadow: 0 0 0 4px rgba(56,189,248,.35); }
+    .seek::-moz-range-track { background: transparent; }
+    .time-labels { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+    .controls { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 16px; }
+    @media (max-width: 480px) { .controls { grid-template-columns: repeat(3, 1fr); } }
+    .controls > .btn { flex: 1; }
+    .extras { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; }
+    .toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text-muted); cursor: pointer; user-select: none; min-height: 36px; }
+    .toggle input { width: 18px; height: 18px; accent-color: var(--primary); }
+    .audio-row { margin-top: 14px; }
+
+    .vol-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+    .vol-slider { flex: 1; accent-color: var(--primary); cursor: pointer; height: 32px; }
+
+    /* History */
+    .history-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .history-title { font-size: 0.92rem; font-weight: 600; color: var(--text-muted); }
+    .search-input { padding: 10px 14px; font-size: 0.9rem; margin-bottom: 12px; }
+    .history-list { display: flex; flex-direction: column; gap: 8px; }
+    .history-item {
+      display: flex; gap: 12px; align-items: center; padding: 10px;
+      background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border); border-radius: 12px;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .history-item:hover { background: rgba(56, 189, 248, 0.1); }
+    .thumb { flex: none; width: 64px; height: 44px; border-radius: 8px; object-fit: cover; background: rgba(255,255,255,.06); }
+    .thumb.empty { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 1.2rem; }
+    .h-body { flex: 1; min-width: 0; }
+    .h-title { font-size: 0.88rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .h-sub { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    .h-bar { flex: 1; height: 4px; background: rgba(255,255,255,.12); border-radius: 2px; overflow: hidden; }
+    .h-bar > div { height: 100%; background: var(--primary); }
+    .h-actions { flex: none; display: flex; gap: 6px; align-items: center; }
+    .icon-btn { background: none; border: none; color: var(--text-muted); font-size: 1.1rem; width: 36px; height: 36px; border-radius: 8px; cursor: pointer; }
+    .icon-btn:hover { background: rgba(248,113,113,.2); color: var(--danger); }
+    .muted { font-size: 0.85rem; color: var(--text-muted); }
+
+    /* Options */
+    .options-box { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); display: none; flex-direction: column; gap: 14px; }
+    .options-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .options-title { font-size: 0.95rem; font-weight: 600; overflow-wrap: anywhere; }
+    .option-group { display: flex; flex-direction: column; gap: 6px; }
+    .option-label { font-size: 0.78rem; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; color: var(--text-muted); }
+    .chips-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      padding: 8px 14px; min-height: 36px; border-radius: 8px; font-size: 0.84rem; font-weight: 500;
+      background: rgba(15, 23, 42, 0.7); border: 1px solid var(--border); color: var(--text);
+      cursor: pointer; transition: all 0.15s ease; user-select: none; display: inline-flex; align-items: center;
+    }
+    .chip:hover { border-color: var(--primary); background: rgba(56, 189, 248, 0.1); }
+    .chip.active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(129, 140, 248, 0.25));
+      border-color: var(--primary); color: #fff; box-shadow: 0 0 10px rgba(56, 189, 248, 0.3); font-weight: 600;
+    }
+    .search-results { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+    .sr-item { display: flex; gap: 12px; align-items: center; padding: 8px; border-radius: 10px; cursor: pointer;
+      background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border); }
+    .sr-item:hover, .sr-item.first { background: rgba(56, 189, 248, 0.12); border-color: var(--primary); }
+    .sr-item .thumb { width: 44px; height: 62px; }
+    .sr-title { font-size: 0.92rem; font-weight: 600; }
+    .sr-sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 2px; }
+    .helper { font-size: 0.82rem; color: var(--text-muted); }
+    .helper summary { cursor: pointer; padding: 6px 0; }
+    .helper p { margin: 6px 0 10px; line-height: 1.5; }
+    .helper .bm { display: inline-flex; width: auto; }
+    .chips-row.scroll { max-height: 168px; overflow-y: auto; padding-right: 4px; }
+    .chip.num { min-width: 44px; justify-content: center; padding: 8px 10px; }
+    .inspecting-spinner { font-size: 0.8rem; color: var(--primary); }
+
+    dialog { margin: auto; padding: 20px; width: min(92vw, 380px); border-radius: 16px; border: 1px solid var(--border); background: #1e293b; color: var(--text); }
+    dialog::backdrop { background: rgba(0,0,0,.6); }
+    dialog h2 { font-size: 1.05rem; margin-bottom: 14px; }
+    .tv-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+
+    .toast {
+      position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translate(-50%, 20px);
+      background: #1e293b; border: 1px solid var(--border); padding: 12px 18px; border-radius: 12px;
+      font-size: 0.88rem; opacity: 0; pointer-events: none; transition: all .25s; max-width: 90vw; z-index: 10;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title-group"><h1>TV Caster Hub</h1></div>
+      <button class="tv-badge" id="tvBadge" title="Выбрать телевизор">
+        <span class="tv-dot"></span><span id="tvName">ТВ…</span>
+      </button>
+    </div>
+
+    <!-- Cast card -->
+    <div class="card">
+      <div class="input-group">
+        <label class="input-label" for="urlInput">Вставьте ссылку или введите название:</label>
+        <input class="url-input" id="urlInput" type="url" inputmode="url" placeholder="Ссылка, название фильма или сериала, IMDb ID…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        <div class="search-results" id="searchResults" style="display:none"></div>
+        <button class="btn" id="castBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"></path><line x1="2" y1="20" x2="2.01" y2="20"></line></svg>
+          <span id="castBtnText">Показать на ТВ</span>
+        </button>
+
+        <div class="status-banner" id="statusBanner">
+          <div class="steps" id="steps"></div>
+          <div class="status-top"><span id="statusMessage"></span><span class="status-meta" id="statusMeta"></span></div>
+          <div class="dl-progress-bar" id="dlBar"><div class="dl-progress-fill" id="dlProgressFill"></div></div>
+          <div class="status-hint" id="statusHint"></div>
+          <div class="status-actions" id="statusActions" style="display:none">
+            <button class="btn btn-small" id="retryBtn">Повторить</button>
+            <button class="btn btn-small btn-secondary" id="dismissBtn">Скрыть</button>
+          </div>
+        </div>
+
+        <details class="helper" id="bookmarkletHelp">
+          <summary>Сайт закрыт защитой (например kinogohd.online)?</summary>
+          <p>Приложение не может читать такие страницы само, но ваш браузер может. Перетащите кнопку ниже на панель закладок.
+             Потом откройте нужную страницу сайта и нажмите на эту закладку: ссылка на плеер сама появится здесь.</p>
+          <a class="btn btn-secondary btn-small bm" id="bookmarklet" href="#" draggable="true">▶ На ТВ</a>
+        </details>
+
+        <div class="options-box" id="optionsBox">
+          <div class="options-header">
+            <div class="options-title" id="detectedTitle">Опции воспроизведения</div>
+            <div class="inspecting-spinner" id="inspectSpinner" style="display:none">Проверка ссылки…</div>
+          </div>
+          <div class="option-group" id="seasonsGroup" style="display:none">
+            <div class="option-label">Сезон</div>
+            <div class="chips-row" id="seasonsChips"></div>
+          </div>
+          <div class="option-group" id="episodesGroup" style="display:none">
+            <div class="option-label">Серия</div>
+            <div class="chips-row scroll" id="episodesChips"></div>
+          </div>
+          <div class="option-group" id="translationsGroup" style="display:none">
+            <div class="option-label">Озвучка / перевод</div>
+            <div class="chips-row" id="translationsChips"></div>
+          </div>
+          <div class="option-group">
+            <div class="option-label">Качество видео</div>
+            <div class="chips-row" id="qualitiesChips"></div>
+          </div>
+          <div class="option-group">
+            <div class="option-label">Скорость воспроизведения</div>
+            <div class="chips-row" id="speedsChips"></div>
+          </div>
+          <button class="btn" id="castOptsBtn">Смотреть с выбранными настройками</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Player -->
+    <div class="card" id="playerCard">
+      <div class="player-header">
+        <div class="player-title" id="mediaTitle">Готов к трансляции</div>
+        <div class="player-state state-STOPPED" id="tvStateBadge">STOPPED</div>
+      </div>
+
+      <div class="seek-wrap">
+        <div class="seek-track"></div>
+        <div class="seek-buffer" id="seekBuffer"></div>
+        <div class="seek-fill" id="seekFill"></div>
+        <input class="seek" id="seek" type="range" min="0" max="1000" value="0" aria-label="Позиция" />
+      </div>
+      <div class="time-labels"><span id="currentTime">0:00</span><span id="totalTime">0:00</span></div>
+
+      <div class="controls">
+        <button class="btn btn-secondary" data-seek="-30">−30с</button>
+        <button class="btn btn-secondary" data-seek="-10">−10с</button>
+        <button class="btn btn-secondary" id="playPauseBtn">Пауза</button>
+        <button class="btn btn-secondary" data-seek="10">+10с</button>
+        <button class="btn btn-secondary" data-seek="30">+30с</button>
+      </div>
+      <div class="controls" style="display: flex; margin-top: 10px;">
+        <button class="btn btn-secondary" id="prevBtn" style="display:none">◀ Предыдущая</button>
+        <button class="btn btn-secondary" id="nextBtn" style="display:none">Следующая ▶</button>
+        <button class="btn btn-secondary btn-danger" id="stopBtn">Стоп</button>
+      </div>
+
+      <div class="extras">
+        <label class="toggle"><input type="checkbox" id="autonext"> Автоматически включать следующую серию</label>
+      </div>
+
+      <div class="option-group audio-row" id="audioGroup" style="display:none">
+        <div class="option-label">Аудиодорожка</div>
+        <div class="chips-row" id="audioChips"></div>
+      </div>
+
+      <div class="vol-row">
+        <span>Громкость</span>
+        <input class="vol-slider" id="volSlider" type="range" min="0" max="100" value="50" aria-label="Громкость" />
+        <span id="volText" style="min-width: 40px; font-size: 0.85rem;">50%</span>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="card">
+      <div class="history-head">
+        <div class="history-title">История</div>
+        <button class="btn btn-secondary btn-small" id="clearHistoryBtn">Очистить</button>
+      </div>
+      <input class="search-input" id="historySearch" type="search" placeholder="Поиск по истории" autocomplete="off" />
+      <div class="history-list" id="historyList"><div class="muted">Пока пусто</div></div>
+    </div>
+  </div>
+
+  <dialog id="tvDialog">
+    <h2>Выберите телевизор</h2>
+    <div class="tv-list" id="tvList"><div class="muted">Ищу устройства в сети…</div></div>
+    <button class="btn btn-secondary" id="tvClose">Закрыть</button>
+  </dialog>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const QUALITIES = ['720p', '1080p', '480p', '360p'];
+    const SPEEDS = ['1.0x', '1.25x', '1.5x'];
+    const STEPS = [['extract', 'Поиск'], ['download', 'Загрузка'], ['convert', 'Конвертация'], ['tv', 'ТВ']];
+
+    let sel = { translationId: null, voiceTitle: null, seasonId: null, episodeId: null, quality: '720p', speed: '1.0x' };
+    let seriesData = null;     // seasons/episodes of the inspected page, null for a movie
+    let pendingSel = null;     // choice to apply after inspect (opened from history)
+    let st = {};              // latest /api/status
+    let relSec = 0, durSec = 0;
+    let dragging = false;
+    let lastPayload = null;   // for "Повторить"
+    let dismissedError = '';
+    let historyCache = [];
+    let lastInspected = '';
+    let inspectTimer = null;
+
+    // ---------- helpers ----------
+    function toSec(t) {
+      if (!t) return 0;
+      const p = t.split(':').map(Number);
+      if (p.some(isNaN)) return 0;
+      return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p.length === 2 ? p[0] * 60 + p[1] : 0;
+    }
+    function fmt(sec) {
+      sec = Math.max(0, Math.floor(sec));
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      const mm = h ? String(m).padStart(2, '0') : String(m);
+      return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+    }
+    function hms(sec) {
+      sec = Math.max(0, Math.floor(sec));
+      return [Math.floor(sec / 3600), Math.floor((sec % 3600) / 60), sec % 60].map(v => String(v).padStart(2, '0')).join(':');
+    }
+    function fmtEta(sec) {
+      if (sec == null) return '';
+      if (sec < 60) return 'осталось ~' + Math.max(5, sec) + ' с';
+      return 'осталось ~' + Math.round(sec / 60) + ' мин';
+    }
+    function toast(msg) {
+      const t = $('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => t.classList.remove('show'), 3200);
+    }
+    async function api(path, body) {
+      const opts = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+      const r = await fetch(path, opts);
+      return r.json();
+    }
+    function el(tag, props = {}, children = []) {
+      const e = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+        else e.setAttribute(k, v);
+      }
+      for (const c of children) e.append(c);
+      return e;
+    }
+
+    // ---------- options (quality / speed / translation) ----------
+    function renderChips(container, items, active, onPick, labelOf) {
+      container.replaceChildren(...items.map(it => {
+        const chip = el('div', { class: 'chip' + (it === active ? ' active' : ''), text: labelOf ? labelOf(it) : it });
+        chip.addEventListener('click', () => { onPick(it); });
+        return chip;
+      }));
+    }
+    function renderQualities(list) {
+      renderChips($('qualitiesChips'), list, sel.quality, q => { sel.quality = q; renderQualities(list); },
+        q => q === '720p' ? '720p HD (рекомендуется)' : q);
+    }
+    function renderSpeeds() {
+      renderChips($('speedsChips'), SPEEDS, sel.speed, s => { sel.speed = s; renderSpeeds(); },
+        s => s === '1.0x' ? '1.0x (обычная)' : s);
+    }
+    function renderTranslations(list) {
+      const g = $('translationsGroup');
+      if (!list || !list.length) { g.style.display = 'none'; sel.translationId = null; return; }
+      g.style.display = 'flex';
+      let cur = list.find(t => t.id === sel.translationId) || list.find(t => t.title === sel.voiceTitle) || list[0];
+      sel.translationId = cur.id; sel.voiceTitle = cur.title;
+      $('translationsChips').replaceChildren(...list.map(t => {
+        const chip = el('div', { class: 'chip' + (t.id === sel.translationId ? ' active' : ''), text: t.title });
+        chip.addEventListener('click', () => { sel.translationId = t.id; sel.voiceTitle = t.title; renderTranslations(list); });
+        return chip;
+      }));
+    }
+
+    function renderSeries() {
+      const g1 = $('seasonsGroup'), g2 = $('episodesGroup');
+      if (!seriesData) { g1.style.display = g2.style.display = 'none'; sel.episodeId = null; return; }
+      g1.style.display = g2.style.display = 'flex';
+      const seasons = seriesData.seasons;
+      if (!seasons.some(x => x.id === sel.seasonId)) sel.seasonId = seasons[0].id;
+      const season = seasons.find(x => x.id === sel.seasonId);
+      renderChips($('seasonsChips'), seasons.map(x => x.id), sel.seasonId,
+        id => { sel.seasonId = id; sel.episodeId = null; renderSeries(); },
+        id => seasons.find(x => x.id === id).title);
+      if (!season.episodes.some(e => e.id === sel.episodeId)) sel.episodeId = season.episodes.length ? season.episodes[0].id : null;
+      renderChips($('episodesChips'), season.episodes.map(e => e.id), sel.episodeId,
+        id => { sel.episodeId = id; renderSeries(); },
+        id => season.episodes.find(e => e.id === id).title.replace(/^\D+/, '') || id);
+      $('episodesChips').querySelectorAll('.chip').forEach(c => c.classList.add('num'));
+      const active = $('episodesChips').querySelector('.chip.active');
+      if (active) active.scrollIntoView({ block: 'nearest' });
+      const ep = season.episodes.find(e => e.id === sel.episodeId);
+      renderTranslations(ep ? ep.translations : []);
+    }
+
+    async function inspectInputUrl() {
+      const url = $('urlInput').value.trim();
+      if (!url.startsWith('http')) { $('optionsBox').style.display = 'none'; return; }
+      if (url === lastInspected) return;
+      lastInspected = url;
+      $('optionsBox').style.display = 'flex';
+      $('inspectSpinner').style.display = 'block';
+      try {
+        const data = await api('/api/inspect', { url });
+        if (data.ok) {
+          if (data.title) $('detectedTitle').textContent = data.title;
+          seriesData = data.kind === 'series' ? data : null;
+          if (seriesData && pendingSel && pendingSel.episode) {
+            const sn = seriesData.seasons.find(x => x.episodes.some(e => e.id === pendingSel.episode));
+            if (sn) { sel.seasonId = sn.id; sel.episodeId = pendingSel.episode; }
+            if (pendingSel.voice) sel.voiceTitle = pendingSel.voice;
+          }
+          if (seriesData && !(pendingSel && pendingSel.episode)) {
+            // a link like .../2-season/5-episode preselects that episode
+            const mm = url.match(/(\d+)-season\/(\d+)-episode/);
+            if (mm) {
+              const sid = 's' + mm[1].padStart(2, '0'), eid = sid + 'e' + mm[2].padStart(2, '0');
+              if (seriesData.seasons.some(x => x.episodes.some(e => e.id === eid))) { sel.seasonId = sid; sel.episodeId = eid; }
+            }
+          }
+          pendingSel = null;
+          if (seriesData) renderSeries(); else { renderSeries(); renderTranslations(data.translations); }
+          const q = data.qualities && data.qualities.length ? data.qualities : QUALITIES;
+          if (!q.includes(sel.quality)) sel.quality = q.includes('720p') ? '720p' : q[0];
+          renderQualities(q);
+        } else if (data.error) {
+          toast(data.error);
+        }
+      } catch (e) {
+        console.error('inspect', e);
+      }
+      $('inspectSpinner').style.display = 'none';
+    }
+
+    // ---------- casting ----------
+    async function castPayload(payload) {
+      lastPayload = payload;
+      dismissedError = '';
+      const btn = $('castBtn');
+      btn.disabled = true;
+      $('castBtnText').textContent = 'Запускаю…';
+      showBanner(false, 'Связываюсь с сервером…', '', 5, [0, 'extract']);
+      try {
+        await api('/api/cast', payload);
+        setTimeout(loadHistory, 1500);
+      } catch (e) {
+        toast('Сервер недоступен: ' + e);
+      }
+      btn.disabled = false;
+      $('castBtnText').textContent = 'Показать на ТВ';
+    }
+    function castURL() {
+      const url = $('urlInput').value.trim();
+      if (!url) return;
+      if (!isLink(url)) { toast('Выберите вариант из списка или вставьте ссылку'); return; }
+      castPayload({ url, translation_id: sel.translationId, translation_title: sel.voiceTitle, episode: seriesData ? sel.episodeId : null, quality: sel.quality, speed: sel.speed });
+      $('urlInput').value = '';
+      $('optionsBox').style.display = 'none';
+      lastInspected = '';
+    }
+
+    // ---------- status banner ----------
+    function showBanner(isError, msg, meta, pct, stage, hint) {
+      const b = $('statusBanner');
+      b.style.display = 'flex';
+      b.classList.toggle('error', isError);
+      $('statusMessage').textContent = msg;
+      $('statusMeta').textContent = meta || '';
+      $('statusHint').textContent = hint || '';
+      $('statusHint').style.display = hint ? 'block' : 'none';
+      $('dlBar').style.display = isError ? 'none' : 'block';
+      $('dlProgressFill').style.width = (pct || 0) + '%';
+      $('statusActions').style.display = isError ? 'flex' : 'none';
+      const idx = stage ? STEPS.findIndex(s => s[0] === stage[1]) : -1;
+      $('steps').style.display = isError ? 'none' : 'flex';
+      $('steps').replaceChildren(...STEPS.map((s, i) =>
+        el('div', { class: 'step' + (i < idx ? ' done' : i === idx ? ' active' : ''), text: s[1] })));
+    }
+    function renderBanner(d) {
+      const s = d.app_status;
+      if (s === 'error') {
+        if (dismissedError === d.error) { $('statusBanner').style.display = 'none'; return; }
+        showBanner(true, d.error || 'Не удалось обработать ссылку', '', 0, null, d.error_hint);
+      } else if (s === 'preparing' || s === 'downloading' || s === 'remuxing') {
+        const parts = [];
+        if (d.speed && s === 'downloading') parts.push(d.speed);
+        if (d.eta != null) parts.push(fmtEta(d.eta));
+        const pct = s === 'downloading' ? ' ' + d.progress + '%' : '';
+        showBanner(false, d.status_text + pct, parts.join(' · '), d.progress, [0, d.stage]);
+      } else {
+        $('statusBanner').style.display = 'none';
+      }
+    }
+
+    // ---------- seek ----------
+    function clampToBuffer(sec) {
+      const buffered = st.buffered == null ? 100 : st.buffered;
+      if (buffered < 100 && durSec > 0) {
+        const limit = Math.max(0, durSec * buffered / 100 - 10);
+        if (sec > limit) { toast('Видео загружено на ' + buffered + '%, дальше перематывать пока нельзя'); return limit; }
+      }
+      return sec;
+    }
+    async function seekTo(sec) {
+      sec = clampToBuffer(Math.min(Math.max(0, sec), durSec || sec));
+      await api('/api/control', { action: 'seek', target: hms(sec) });
+      setTimeout(pollStatus, 400);
+    }
+    const seek = $('seek');
+    seek.addEventListener('input', () => {
+      dragging = true;
+      if (durSec > 0) $('currentTime').textContent = fmt(seek.value / 1000 * durSec);
+      $('seekFill').style.width = seek.value / 10 + '%';
+    });
+    seek.addEventListener('change', async () => {
+      if (durSec > 0) await seekTo(seek.value / 1000 * durSec);
+      dragging = false;
+    });
+
+    // ---------- status polling ----------
+    async function pollStatus() {
+      try {
+        const d = await api('/api/status');
+        st = d;
+        $('mediaTitle').textContent = d.title && d.title !== 'No media playing' ? d.title : 'Готов к трансляции';
+        const badge = $('tvStateBadge');
+        const state = d.tv_state || 'STOPPED';
+        badge.textContent = ({ PLAYING: 'Играет', PAUSED_PLAYBACK: 'Пауза', PAUSED: 'Пауза', STOPPED: 'Остановлено', TRANSITIONING: 'Загрузка', NO_MEDIA_PRESENT: 'Пусто' })[state] || state;
+        badge.className = 'player-state state-' + state;
+
+        relSec = toSec(d.rel_time); durSec = toSec(d.duration);
+        if (durSec > 6 * 3600) durSec = 0; // live stream: the TV reports a fake length
+        if (!dragging) {
+          $('currentTime').textContent = fmt(relSec);
+          const pct = durSec > 0 ? Math.min(100, relSec / durSec * 100) : 0;
+          $('seekFill').style.width = pct + '%';
+          seek.value = pct * 10;
+        }
+        $('totalTime').textContent = fmt(durSec);
+        $('seekBuffer').style.width = (d.buffered == null ? 100 : d.buffered) + '%';
+        $('playPauseBtn').textContent = state === 'PLAYING' ? 'Пауза' : 'Играть';
+
+        const vol = $('volSlider');
+        if (document.activeElement !== vol) { vol.value = d.volume; $('volText').textContent = d.volume + '%'; }
+
+        const tv = $('tvBadge');
+        tv.classList.toggle('offline', !d.tv_online);
+        $('tvName').textContent = (d.tv_name || d.tv_ip) + (d.tv_online ? '' : ' · нет связи');
+
+        $('nextBtn').style.display = d.next_url ? 'flex' : 'none';
+        $('prevBtn').style.display = d.prev_url ? 'flex' : 'none';
+        $('autonext').checked = !!d.autonext;
+
+        const tracks = d.audio_tracks || [];
+        $('audioGroup').style.display = tracks.length > 1 ? 'flex' : 'none';
+        if (tracks.length > 1) {
+          $('audioChips').replaceChildren(...tracks.map(t => {
+            const label = 'Дорожка ' + (t.n + 1) + (t.lang ? ' · ' + t.lang : '') + ' · ' + t.codec;
+            const chip = el('div', { class: 'chip' + (t.n === d.audio_index ? ' active' : ''), text: label });
+            chip.addEventListener('click', () => switchAudio(t.n));
+            return chip;
+          }));
+        }
+        renderBanner(d);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    function schedulePoll() {
+      setTimeout(async () => { await pollStatus(); schedulePoll(); }, document.hidden ? 5000 : 1000);
+    }
+
+    // ---------- controls ----------
+    async function control(action, extra = {}) {
+      await api('/api/control', { action, ...extra });
+      setTimeout(pollStatus, 300);
+    }
+    function togglePlayPause() { control(st.tv_state === 'PLAYING' ? 'pause' : 'play'); }
+    async function switchAudio(n) {
+      const r = await api('/api/audio_track', { index: n });
+      if (!r.ok) toast(r.error || 'Не удалось переключить дорожку');
+      else toast('Переключаю дорожку, продолжу с этого места');
+    }
+    let volTimer = null;
+    $('volSlider').addEventListener('input', e => {
+      $('volText').textContent = e.target.value + '%';
+      clearTimeout(volTimer);
+      volTimer = setTimeout(() => api('/api/control', { action: 'volume', value: +e.target.value }), 150);
+    });
+
+    // ---------- history ----------
+    async function loadHistory() {
+      try { historyCache = await api('/api/history'); } catch (e) { console.error(e); }
+      renderHistory();
+    }
+    function renderHistory() {
+      const q = $('historySearch').value.trim().toLowerCase();
+      const list = historyCache.filter(h => !q || (h.title || '').toLowerCase().includes(q) || (h.url || '').toLowerCase().includes(q));
+      const box = $('historyList');
+      if (!list.length) { box.replaceChildren(el('div', { class: 'muted', text: q ? 'Ничего не найдено' : 'Пока пусто' })); return; }
+      box.replaceChildren(...list.map(h => {
+        const thumb = h.thumb
+          ? el('img', { class: 'thumb', src: h.thumb, loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' })
+          : el('div', { class: 'thumb empty', text: '▶' });
+        if (h.thumb) thumb.addEventListener('error', () => thumb.replaceWith(el('div', { class: 'thumb empty', text: '▶' })));
+
+        const body = el('div', { class: 'h-body' }, [el('div', { class: 'h-title', text: h.title || h.url, title: h.title || '' })]);
+        const canResume = h.position >= 30 && h.duration && h.duration - h.position > 60;
+        if (canResume) {
+          body.append(el('div', { class: 'h-sub' }, [
+            el('div', { class: 'h-bar' }, [el('div', { style: 'width:' + Math.min(100, h.position / h.duration * 100) + '%' })]),
+            el('span', { class: 'muted', text: fmt(h.position) + ' из ' + fmt(h.duration) }),
+          ]));
+        }
+
+        const actions = el('div', { class: 'h-actions' });
+        if (canResume) {
+          actions.append(el('button', { class: 'btn btn-small', text: 'Продолжить', onclick: ev => {
+            ev.stopPropagation();
+            castPayload({ url: h.url, translation_id: h.translation_id, translation_title: h.translation_title, episode: h.episode || null, quality: h.quality || '720p', speed: h.speed || '1.0x', start_at: Math.floor(h.position) });
+          } }));
+        }
+        actions.append(el('button', { class: 'icon-btn', title: 'Удалить', text: '✕', onclick: async ev => {
+          ev.stopPropagation();
+          await api('/api/history/delete', { url: h.url, episode: h.episode || null });
+          loadHistory();
+        } }));
+
+        const row = el('div', { class: 'history-item' }, [thumb, body, actions]);
+        row.addEventListener('click', () => { pendingSel = { episode: h.episode, voice: h.translation_title }; $('urlInput').value = h.url; lastInspected = ''; inspectInputUrl(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+        return row;
+      }));
+    }
+
+    // ---------- TV picker ----------
+    async function openTvPicker() {
+      const dlg = $('tvDialog');
+      $('tvList').replaceChildren(el('div', { class: 'muted', text: 'Ищу устройства в сети…' }));
+      if (!dlg.open) dlg.showModal();
+      try {
+        const r = await api('/api/tvs');
+        if (!r.devices.length) { $('tvList').replaceChildren(el('div', { class: 'muted', text: 'Телевизоры не найдены. Проверьте, что они включены и в той же сети.' })); return; }
+        $('tvList').replaceChildren(...r.devices.map(d => el('button', {
+          class: 'btn ' + (d.ip === r.current ? '' : 'btn-secondary'),
+          text: d.name + ' · ' + d.ip,
+          onclick: async () => { await api('/api/tv', { ip: d.ip }); dlg.close(); toast('Телевизор: ' + d.name); pollStatus(); },
+        })));
+      } catch (e) {
+        $('tvList').replaceChildren(el('div', { class: 'muted', text: 'Ошибка поиска: ' + e }));
+      }
+    }
+
+    // ---------- wiring ----------
+    $('castBtn').addEventListener('click', castURL);
+    $('castOptsBtn').addEventListener('click', castURL);
+    $('retryBtn').addEventListener('click', () => lastPayload ? castPayload(lastPayload) : toast('Нечего повторять'));
+    $('dismissBtn').addEventListener('click', () => { dismissedError = st.error; $('statusBanner').style.display = 'none'; });
+    $('playPauseBtn').addEventListener('click', togglePlayPause);
+    $('stopBtn').addEventListener('click', () => control('stop'));
+    $('nextBtn').addEventListener('click', async () => {
+      const r = await api('/api/next', {});
+      if (!r.ok) toast(r.error);
+    });
+    $('prevBtn').addEventListener('click', async () => {
+      const r = await api('/api/prev', {});
+      if (!r.ok) toast(r.error);
+    });
+    $('autonext').addEventListener('change', e => api('/api/settings', { autonext: e.target.checked }));
+    document.querySelectorAll('[data-seek]').forEach(b => b.addEventListener('click', () => seekTo(relSec + +b.dataset.seek)));
+    $('tvBadge').addEventListener('click', openTvPicker);
+    $('tvClose').addEventListener('click', () => $('tvDialog').close());
+    $('historySearch').addEventListener('input', renderHistory);
+    $('clearHistoryBtn').addEventListener('click', async () => {
+      if (!historyCache.length || !confirm('Очистить всю историю?')) return;
+      await api('/api/history/clear', {});
+      loadHistory();
+    });
+    // ---------- search by title ----------
+    const isLink = v => /^(https?:|magnet:)/i.test(v);
+    const imdbId = v => { const m = v.match(/(?:imdb\.com\/title\/|^)(tt\d{6,10})/i); return m ? m[1].toLowerCase() : null; };
+    let searchTimer = null, searchSeq = 0;
+    const hideSearch = () => { $('searchResults').style.display = 'none'; $('searchResults').replaceChildren(); };
+
+    function usePlayerLink(id) {
+      $('urlInput').value = 'https://api.nextembed.ws/embed/imdb/' + id;
+      hideSearch();
+      lastInspected = '';
+      inspectInputUrl();
+    }
+    async function runSearch(q) {
+      const seq = ++searchSeq;
+      const box = $('searchResults');
+      box.style.display = 'flex';
+      box.replaceChildren(el('div', { class: 'muted', text: 'Ищу…' }));
+      let r;
+      try { r = await api('/api/search?q=' + encodeURIComponent(q)); } catch (e) { r = { ok: false, error: 'Сервер недоступен' }; }
+      if (seq !== searchSeq) return;   // a newer query is running
+      if (!r.ok || !r.results.length) {
+        box.replaceChildren(el('div', { class: 'muted', text: r.ok ? 'Ничего не найдено. Попробуйте название по-английски или ссылку.' : r.error }));
+        return;
+      }
+      box.replaceChildren(...r.results.map((x, i) => {
+        const thumb = x.image ? el('img', { class: 'thumb', src: x.image, loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' })
+                              : el('div', { class: 'thumb empty', text: '▶' });
+        const row = el('div', { class: 'sr-item' + (i === 0 ? ' first' : '') }, [thumb, el('div', { class: 'h-body' }, [
+          el('div', { class: 'sr-title', text: x.title + (x.year ? ' (' + x.year + ')' : '') }),
+          el('div', { class: 'sr-sub', text: x.type + (x.cast ? ' · ' + x.cast : '') }),
+        ])]);
+        row.addEventListener('click', () => usePlayerLink(x.id));
+        return row;
+      }));
+    }
+    function onInput() {
+      clearTimeout(inspectTimer); clearTimeout(searchTimer);
+      const v = $('urlInput').value.trim();
+      if (isLink(v)) { hideSearch(); inspectTimer = setTimeout(inspectInputUrl, 400); return; }
+      const id = imdbId(v);
+      if (id) { usePlayerLink(id); return; }
+      $('optionsBox').style.display = 'none'; lastInspected = '';
+      if (v.length < 2) { hideSearch(); searchSeq++; return; }
+      searchTimer = setTimeout(() => runSearch(v), 350);
+    }
+    $('urlInput').addEventListener('input', onInput);
+    $('urlInput').addEventListener('paste', () => setTimeout(onInput, 100));
+    $('urlInput').addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      const first = document.querySelector('#searchResults .sr-item');
+      if (first && !isLink($('urlInput').value.trim())) first.click(); else castURL();
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.target.matches('input[type=text], input[type=url], input[type=search], textarea')) return;
+      if (e.key === ' ') { e.preventDefault(); togglePlayPause(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); seekTo(relSec - 10); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); seekTo(relSec + 10); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const v = Math.min(100, Math.max(0, (st.volume || 0) + (e.key === 'ArrowUp' ? 5 : -5)));
+        $('volSlider').value = v; $('volText').textContent = v + '%';
+        api('/api/control', { action: 'volume', value: v });
+      }
+    });
+
+    // bookmarklet: run on a protected site's page, finds the player iframe and opens this app with its link
+    (function () {
+      const code = "(function(){var f=[].slice.call(document.querySelectorAll('iframe')).map(function(i){return i.src||i.getAttribute('data-src')||''}).filter(function(s){return /nextembed/.test(s)&&!/trailer/.test(s)})[0];"
+        + "if(!f){alert('Плеер не найден на этой странице');return}if(f.indexOf('//')==0)f='https:'+f;f=f.split('?')[0];"
+        + "location.href='" + location.origin + "/?url='+encodeURIComponent(f)})();";
+      $('bookmarklet').setAttribute('href', 'javascript:' + code);
+      $('bookmarklet').addEventListener('click', e => { e.preventDefault(); toast('Перетащите эту кнопку на панель закладок'); });
+    })();
+
+    // opened by the bookmarklet: ?url=<player link>
+    (function () {
+      const u = new URLSearchParams(location.search).get('url');
+      if (!u) return;
+      history.replaceState(null, '', location.pathname);
+      $('urlInput').value = u;
+      setTimeout(inspectInputUrl, 300);
+    })();
+
+    renderQualities(QUALITIES);
+    renderSpeeds();
+    pollStatus().then(schedulePoll);
+    loadHistory();
+  </script>
+</body>
+</html>
