@@ -33,6 +33,8 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
     WebView webView;
     MediaPlayer activeMediaPlayer;
     Handler mainHandler;
+    String loadedPageUrl = null;
+    String activeStreamUrl = null;
 
     volatile int cachedPositionSec = 0;
     volatile int cachedDurationSec = 0;
@@ -47,7 +49,7 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
                 cachedIsPlaying = videoView.isPlaying();
                 int posMs = videoView.getCurrentPosition();
                 int durMs = videoView.getDuration();
-                if (posMs >= 0) {
+                if (posMs > 0) {
                     cachedPositionSec = posMs / 1000;
                 }
                 if (durMs > 0) {
@@ -64,13 +66,22 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
     @Override
     public void onPrepared(MediaPlayer mp) {
         activeMediaPlayer = mp;
-        if (pendingSeekSec > 0) {
-            videoView.seekTo(pendingSeekSec * 1000);
-            pendingSeekSec = 0;
+        try {
+            int durMs = mp.getDuration();
+            if (durMs > 0) {
+                cachedDurationSec = durMs / 1000;
+            }
+            if (pendingSeekSec > 0) {
+                mp.seekTo(pendingSeekSec * 1000);
+                pendingSeekSec = 0;
+            }
+            mp.start();
+            cachedIsPlaying = true;
+            if (Math.abs(pendingSpeed - 1.0f) > 0.02f) {
+                applyPlaybackSpeed(pendingSpeed);
+            }
+        } catch (Exception ignored) {
         }
-        applyPlaybackSpeed(pendingSpeed);
-        videoView.start();
-        cachedIsPlaying = true;
     }
 
     @Override
@@ -128,7 +139,7 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         setContentView(root);
 
         webView.requestFocus();
-        loadTargetUrl(getIntent());
+        loadTargetUrl(getIntent(), true);
         mainHandler.post(this);
     }
 
@@ -136,10 +147,10 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        loadTargetUrl(intent);
+        loadTargetUrl(intent, false);
     }
 
-    private void loadTargetUrl(Intent intent) {
+    private void loadTargetUrl(Intent intent, boolean forceLoad) {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         String url = prefs.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL);
         if (intent != null && intent.hasExtra("server_url")) {
@@ -149,17 +160,17 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
                 prefs.edit().putString(KEY_SERVER_URL, url).apply();
             }
         }
-        webView.loadUrl(url);
+        if (forceLoad || loadedPageUrl == null || !loadedPageUrl.equals(url)) {
+            loadedPageUrl = url;
+            webView.loadUrl(url);
+        }
     }
 
     void applyPlaybackSpeed(float speed) {
         pendingSpeed = speed;
         if (activeMediaPlayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
-                PlaybackParams params = activeMediaPlayer.getPlaybackParams();
-                if (params == null) {
-                    params = new PlaybackParams();
-                }
+                PlaybackParams params = new PlaybackParams();
                 params.setSpeed(speed);
                 activeMediaPlayer.setPlaybackParams(params);
             } catch (Exception ignored) {
@@ -211,12 +222,15 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
         public void run() {
             try {
                 if (cmd == 1) { // loadStream
+                    if (url != null && url.equals(act.activeStreamUrl) && act.videoView.isPlaying()) {
+                        return;
+                    }
+                    act.activeStreamUrl = url;
                     act.pendingSeekSec = Math.max(0, intVal);
                     act.pendingSpeed = floatVal > 0 ? floatVal : 1.0f;
                     act.cachedPositionSec = act.pendingSeekSec;
-                    act.videoView.stopPlayback();
+                    act.cachedDurationSec = 0;
                     act.videoView.setVideoURI(Uri.parse(url));
-                    act.videoView.start();
                 } else if (cmd == 2) { // play
                     act.videoView.start();
                     act.cachedIsPlaying = true;
@@ -224,13 +238,18 @@ public class MainActivity extends Activity implements MediaPlayer.OnPreparedList
                     act.videoView.pause();
                     act.cachedIsPlaying = false;
                 } else if (cmd == 4) { // stop
+                    act.activeStreamUrl = null;
                     act.videoView.stopPlayback();
                     act.cachedIsPlaying = false;
                     act.cachedPositionSec = 0;
                 } else if (cmd == 5) { // seekTo
                     int clamped = Math.max(0, intVal);
                     act.cachedPositionSec = clamped;
-                    act.videoView.seekTo(clamped * 1000);
+                    if (act.activeMediaPlayer != null) {
+                        act.activeMediaPlayer.seekTo(clamped * 1000);
+                    } else {
+                        act.videoView.seekTo(clamped * 1000);
+                    }
                 } else if (cmd == 6) { // setSpeed
                     act.applyPlaybackSpeed(floatVal);
                 }

@@ -73,6 +73,10 @@ def deploy_to_tv(tv_ip=None, port=5555, apk_path=None, server_url=None):
     # 2. Install APK
     inst = subprocess.run([adb, "-s", target, "install", "-r", apk_path], capture_output=True, text=True, timeout=60)
     inst_out = (inst.stdout or "") + "\n" + (inst.stderr or "")
+    if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in inst_out:
+        subprocess.run([adb, "-s", target, "uninstall", "com.tvcaster.player"], capture_output=True, timeout=15)
+        inst = subprocess.run([adb, "-s", target, "install", "-r", apk_path], capture_output=True, text=True, timeout=60)
+        inst_out = (inst.stdout or "") + "\n" + (inst.stderr or "")
     if inst.returncode != 0 or "Success" not in inst_out:
         if "unauthorized" in inst_out.lower():
             return False, (

@@ -64,16 +64,18 @@ docker run --rm --entrypoint bash \
     # 5. Zipalign
     zipalign -f 4 "$BUILD_DIR/unaligned.apk" "$BUILD_DIR/aligned.apk"
 
-    # 6. Generate debug/release keystore and sign APK (v1 + v2)
-    keytool -genkeypair -v \
-      -keystore "$BUILD_DIR/release.keystore" \
-      -alias tvcaster \
-      -keyalg RSA -keysize 2048 -validity 10000 \
-      -storepass tvcaster123 -keypass tvcaster123 \
-      -dname "CN=TV Caster, OU=TV, O=TVCaster, L=Local, S=Local, C=US" >/dev/null 2>&1
+    # 6. Generate persistent release keystore and sign APK (v1 + v2)
+    if [ ! -f /sdk-cache/release.keystore ]; then
+      keytool -genkeypair -v \
+        -keystore /sdk-cache/release.keystore \
+        -alias tvcaster \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -storepass tvcaster123 -keypass tvcaster123 \
+        -dname "CN=TV Caster, OU=TV, O=TVCaster, L=Local, S=Local, C=US" >/dev/null 2>&1
+    fi
 
     apksigner sign \
-      --ks "$BUILD_DIR/release.keystore" \
+      --ks /sdk-cache/release.keystore \
       --ks-pass pass:tvcaster123 \
       --key-pass pass:tvcaster123 \
       --out /workspace/static/tv-caster-player.apk \

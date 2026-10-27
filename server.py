@@ -454,8 +454,17 @@ def _notify_tv_listeners():
     with _tv_event_cond:
         _tv_event_cond.notify_all()
 
-def adb_launch_tv_player():
+_last_adb_launch_ts = 0.0
+_adb_launch_lock = threading.Lock()
+
+def adb_launch_tv_player(force=False):
     """If adb is installed and connected to TV['ip'], wake screen and bring TV Caster Player to foreground."""
+    global _last_adb_launch_ts
+    with _adb_launch_lock:
+        now = time.time()
+        if not force and (now - _last_adb_launch_ts) < 8.0:
+            return
+        _last_adb_launch_ts = now
     adb_bin = shutil.which("adb") or os.path.expanduser("~/.local/bin/adb")
     if not adb_bin or not os.path.exists(adb_bin):
         return
@@ -463,15 +472,22 @@ def adb_launch_tv_player():
     target = f"{tv_ip}:5555"
     server_url = f"http://{LOCAL_IP}:{SERVER_PORT}/tv"
     try:
-        subprocess.run([adb_bin, "connect", target], capture_output=True, timeout=3)
-        subprocess.run([adb_bin, "-s", target, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=2)
+        subprocess.run([adb_bin, "connect", target], capture_output=True, timeout=8)
+        subprocess.run([adb_bin, "-s", target, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=5)
         subprocess.run(
-            [adb_bin, "-s", target, "shell", "am", "start", "-n", "com.tvcaster.player/.MainActivity", "-e", "server_url", server_url],
+            [
+                adb_bin, "-s", target, "shell", "am", "start",
+                "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.LEANBACK_LAUNCHER",
+                "-f", "0x10200000",
+                "-n", "com.tvcaster.player/.MainActivity",
+                "-e", "server_url", server_url,
+            ],
             capture_output=True,
-            timeout=3,
+            timeout=8,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print("ADB launch error:", e, flush=True)
 
 def tv_stop():
     tv_player_state["state"] = "STOPPED"
@@ -687,7 +703,7 @@ def rezka_structure(url):
     } for n in seasons_found if found.get(n)]
     if not seasons:
         raise Exception("Could not locate stream metadata on page")
-    return {"title": title, "kind": "series", "seasons": seasons, "translations": []}
+    return {"title": title, "kind": "series", "seasons": seasons, "translations": voices}
 
 # ---------------- nextembed player (kinogohd.online and similar) ----------------
 IMDB_RE = re.compile(r'(?:imdb\.com/title/)?\b(tt\d{6,10})\b')
@@ -1035,7 +1051,8 @@ def inspect_url(url):
         data = rezka_structure(url)
         series_episodes(url, info=data)
         res = {
-            "ok": True, "title": data["title"], "kind": "series", "seasons": data["seasons"], "translations": [],
+            "ok": True, "title": data["title"], "kind": "series", "seasons": data["seasons"],
+            "translations": data.get("translations", []),
             "qualities": ["720p", "1080p", "480p", "360p"], "speeds": speeds,
         }
     elif "tulsa-king.net" in url or "rezka" in url:
@@ -1068,6 +1085,9 @@ def ensure_media_info_cached(url):
     if norm in _inspect_cache:
         return
     def _bg():
+        time.sleep(2.5)
+        if norm in _inspect_cache:
+            return
         try:
             inspect_url(norm)
         except Exception:
@@ -1101,6 +1121,22 @@ def apply_speed_to_chunk(chunk_bytes, speed_str):
     return chunk_bytes
 
 SAFE_AUDIO = {"aac", "mp3"}  # codecs the TV is known to play
+
+def probe_duration(path=None, data=None):
+    """Return media duration in seconds by parsing `ffmpeg -i` output."""
+    ff = get_ffmpeg()
+    try:
+        if path:
+            proc = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True, timeout=15)
+        else:
+            proc = subprocess.run([ff, "-hide_banner", "-i", "pipe:0"], input=data, capture_output=True, timeout=15)
+        err = proc.stderr.decode("utf-8", errors="ignore")
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
 
 def probe_streams(path=None, data=None):
     """Return [{index, type, codec, lang}] by parsing `ffmpeg -i` output."""
@@ -1712,6 +1748,9 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
             return download_dash(session_id, title, [url], speed, audio_idx)
 
         audios = [x for x in probe_streams(data=head) if x["type"] == "Audio"]
+        probed_dur = probe_duration(data=head)
+        if probed_dur > 0 and session_id == current_session_id:
+            tv_player_state["duration"] = probed_dur
         if not (0 <= audio_idx < len(audios)):
             audio_idx = 0
         convert_audio = bool(audios) and audios[audio_idx]["codec"] not in SAFE_AUDIO
@@ -1774,7 +1813,7 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
         info["active"] = False
         if not cast_triggered:
             tv_cast_url(local_stream_url, title)
-        elif session_id == current_session_id:
+        elif session_id == current_session_id and not tv_player_state.get("use_custom_player", True):
             # live TS has no duration and cannot seek: reload the finished file at the same spot
             pos = tv_get_position()
             if pos["state"] == "PLAYING":
@@ -1785,6 +1824,7 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0):
                     threading.Thread(target=resume_seek, args=(session_id, at + 2), daemon=True).start()
         if session_id == current_session_id:
             app_state.update(status="playing", stage="tv", status_text="Играет на ТВ", download_progress=100)
+            _notify_tv_listeners()
     except Exception as e:
         info["active"] = False
         set_error(session_id, e)
@@ -1863,8 +1903,12 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
         info["resumed"] = True
 
     # Stop TV immediately on new cast request
+    tv_player_state["stream_url"] = ""
+    tv_player_state["session_id"] = 0
     tv_stop()
-    time.sleep(0.3)
+    if tv_player_state.get("use_custom_player", True):
+        threading.Thread(target=adb_launch_tv_player, daemon=True).start()
+    time.sleep(0.2)
     phase(session_id, "tv stopped")
 
     url = normalize_url(url)
@@ -2198,7 +2242,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 tv_player_state["state"] = str(data["state"])
             if "position" in data and data["position"] is not None:
                 tv_player_state["position"] = max(0.0, float(data["position"]))
-            if "duration" in data and data["duration"] is not None and float(data["duration"]) > 0:
+            if "duration" in data and data["duration"] is not None and 0 < float(data["duration"]) < 43200:
                 tv_player_state["duration"] = max(0.0, float(data["duration"]))
             if "volume" in data and data["volume"] is not None:
                 tv_player_state["volume"] = max(0, min(100, int(data["volume"])))

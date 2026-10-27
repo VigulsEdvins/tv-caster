@@ -220,10 +220,10 @@
     if (!currentSessionId) return 0;
     if (hasNativeBridge) {
       const d = Number(window.AndroidBridge.getDuration() || 0);
-      if (d > 0) return d;
+      if (d > 0 && d < 43200) return d;
     } else {
       const d = Number(videoEl.duration || 0);
-      if (isFinite(d) && d > 0) return baseSeekOffset + d;
+      if (isFinite(d) && d > 0 && d < 43200) return baseSeekOffset + d;
     }
     return Math.max(knownDuration, Number(serverState.duration || 0));
   }
