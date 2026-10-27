@@ -1,3 +1,4 @@
+import base64
 import concurrent.futures
 import glob
 import hashlib
@@ -219,7 +220,7 @@ def _note_tv_failure():
 _load_saved_tv()
 
 # ---------------- Settings ----------------
-settings = {"autonext": True}
+settings = {"autonext": True, "direct_stream": True}
 try:
     with open(SETTINGS_FILE) as f:
         settings.update(json.load(f))
@@ -2668,6 +2669,100 @@ def resume_seek(session_id, start_at):
             info["resumed"] = True
             return
 
+_direct_sessions = {}
+
+def _b64_encode_url(u):
+    return base64.urlsafe_b64encode(u.encode("utf-8")).decode("ascii").rstrip("=")
+
+def _b64_decode_url(token):
+    if not token:
+        return ""
+    pad = "=" * ((4 - len(token) % 4) % 4)
+    return base64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8", errors="ignore")
+
+def rewrite_hls_playlist(m3u8_text, base_url, session_id):
+    """Rewrite relative and absolute URLs inside an HLS playlist to proxy through /direct/hls.m3u8 and /direct/stream."""
+    out_lines = []
+    for raw_line in (m3u8_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            out_lines.append(raw_line)
+            continue
+        if line.startswith("#"):
+            if 'URI="' in line:
+                def _repl_uri(m):
+                    uri_val = m.group(1)
+                    abs_u = uri_val if uri_val.startswith("http") else urllib.parse.urljoin(base_url, uri_val)
+                    enc = _b64_encode_url(abs_u)
+                    low_u = abs_u.split("?")[0].lower()
+                    route = "/direct/hls.m3u8" if low_u.endswith(".m3u8") else "/direct/stream"
+                    return f'URI="{route}?v={session_id}&u={enc}"'
+                out_lines.append(re.sub(r'URI="([^"]+)"', _repl_uri, raw_line))
+            else:
+                out_lines.append(raw_line)
+            continue
+        abs_u = line if line.startswith("http") else urllib.parse.urljoin(base_url, line)
+        enc = _b64_encode_url(abs_u)
+        low_u = abs_u.split("?")[0].lower()
+        if low_u.endswith(".m3u8") or ".m3u8?" in abs_u.lower():
+            out_lines.append(f"/direct/hls.m3u8?v={session_id}&u={enc}")
+        else:
+            out_lines.append(f"/direct/stream?v={session_id}&u={enc}")
+    return "\n".join(out_lines) + "\n"
+
+def start_direct_stream(session_id, title, stream_url, headers=None, kind="mp4", speed="1.0x", start_at=0, quality="720p"):
+    """Launch Direct Stream Mode without downloading to media_cache/ or spawning ffmpeg."""
+    info = active_sessions.get(session_id)
+    if not info:
+        return
+    req_headers = {"User-Agent": "Mozilla/5.0"}
+    if headers:
+        req_headers.update(headers)
+    resolved_url = stream_url
+    if kind == "hls":
+        try:
+            resolved_url = resolve_redirects(stream_url, req_headers)
+        except Exception:
+            resolved_url = stream_url
+    _direct_sessions[session_id] = {
+        "url": resolved_url,
+        "headers": req_headers,
+        "kind": kind,
+        "title": title,
+        "quality": quality,
+    }
+    info["direct_stream"] = True
+    info["direct_kind"] = kind
+    info["direct_url"] = resolved_url
+    info["direct_headers"] = req_headers
+    info["start_at"] = float(start_at or 0)
+    info["stream_offset"] = 0.0
+    info["active"] = False
+    info["resumed"] = True
+
+    if kind == "hls":
+        local_proxy_url = f"http://{LOCAL_IP}:{SERVER_PORT}/direct/hls.m3u8?v={session_id}"
+    else:
+        local_proxy_url = f"http://{LOCAL_IP}:{SERVER_PORT}/direct/stream?v={session_id}"
+
+    if session_id == current_session_id:
+        opts = dict(app_state.get("opts") or {})
+        if speed:
+            opts["speed"] = speed
+        if quality:
+            opts["quality"] = quality
+        app_state.update(
+            status="playing",
+            stage="tv",
+            status_text="Играет на ТВ (Прямой поток)",
+            title=title,
+            download_progress=100,
+            download_speed="Direct Stream",
+            opts=opts,
+        )
+    tv_cast_url(local_proxy_url, title)
+    _notify_tv_listeners()
+
 def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", start_at=0, audio_idx=0, episode=None, translation_title=None, seamless=False):
     global app_state
 
@@ -2738,13 +2833,19 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             if speed and speed != "1.0x":
                 title += f" ({speed})"
             remember(title)
-            threading.Thread(target=download_and_stream_hls, args=(session_id, title, stream_url, {"Referer": "https://cinemar.cc/"}, speed, quality), daemon=True).start()
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                start_direct_stream(session_id, title, stream_url, headers={"Referer": "https://cinemar.cc/"}, kind="hls", speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_and_stream_hls, args=(session_id, title, stream_url, {"Referer": "https://cinemar.cc/"}, speed, quality), daemon=True).start()
         elif "vkvideo.ru" in url or "vk.com/video" in url:
             title, stream_url = extract_vk(url)
             if speed and speed != "1.0x":
                 title += f" ({speed})"
             remember(title)
-            threading.Thread(target=download_and_stream_hls, args=(session_id, title, stream_url, None, speed, quality), daemon=True).start()
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                start_direct_stream(session_id, title, stream_url, headers=None, kind="hls", speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_and_stream_hls, args=(session_id, title, stream_url, None, speed, quality), daemon=True).start()
         elif "tulsa-king.net" in url or "rezka" in url:
             title, stream_url, _ = extract_rezka(rezka_target_url(url, episode, translation_id), quality=quality)
             # a voice-over without this episode makes the site silently show another one: catch that
@@ -2757,7 +2858,10 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             if speed and speed != "1.0x":
                 title += f" ({speed})"
             remember(title)
-            threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                start_direct_stream(session_id, title, stream_url, headers=dict(DL_HEADERS), kind="mp4", speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
         elif url.startswith("magnet:"):
             torr_data = json.dumps({"action": "add", "link": url, "save_to_db": True}).encode("utf-8")
             req = urllib.request.Request(f"http://{TV['ip']}:8090/torrents", data=torr_data, headers={"Content-Type": "application/json"})
@@ -2844,9 +2948,15 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                     title += f" ({speed})"
                 remember(title)
                 if ".m3u8" in direct_url:
-                    threading.Thread(target=download_and_stream_hls, args=(session_id, title, direct_url, None, speed, quality), daemon=True).start()
+                    if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                        start_direct_stream(session_id, title, direct_url, headers=None, kind="hls", speed=speed, start_at=start_at, quality=quality)
+                    else:
+                        threading.Thread(target=download_and_stream_hls, args=(session_id, title, direct_url, None, speed, quality), daemon=True).start()
                 else:
-                    threading.Thread(target=download_and_stream_mp4, args=(session_id, title, direct_url, speed, audio_idx, start_at), daemon=True).start()
+                    if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                        start_direct_stream(session_id, title, direct_url, headers=dict(DL_HEADERS), kind="mp4", speed=speed, start_at=start_at, quality=quality)
+                    else:
+                        threading.Thread(target=download_and_stream_mp4, args=(session_id, title, direct_url, speed, audio_idx, start_at), daemon=True).start()
             elif re.search(r'\.(mp4|m3u8|mkv|webm|ts|mov)(\?|$)', url, re.I):
                 tv_cast_url(url, "Web Stream")
                 info["active"] = False
@@ -2947,14 +3057,24 @@ def build_tv_state_payload():
     active_tv_sid = tv_player_state.get("session_id") or current_session_id
     info = active_sessions.get(active_tv_sid) or active_sessions.get(current_session_id) or {}
     stream_url = tv_player_state.get("stream_url") or ""
-    mp4_url = f"/stream.mp4?v={active_tv_sid}" if active_tv_sid and stream_url else ""
-    if active_tv_sid and stream_url:
-        if "/lsm/" in stream_url or ".m3u8" in stream_url:
-            ts_url = stream_url if stream_url.startswith("/") else (stream_url.replace(f"http://{LOCAL_IP}:{SERVER_PORT}", "") if stream_url.startswith(f"http://{LOCAL_IP}:{SERVER_PORT}") else stream_url)
-        else:
-            ts_url = f"/stream.ts?v={active_tv_sid}"
+    is_direct = bool(info.get("direct_stream"))
+    direct_kind = info.get("direct_kind") or "mp4"
+    cdn_url = info.get("direct_url") or ""
+    direct_headers = dict(info.get("direct_headers") or {})
+    if is_direct and active_tv_sid:
+        direct_url = f"/direct/hls.m3u8?v={active_tv_sid}" if direct_kind == "hls" else f"/direct/stream?v={active_tv_sid}"
+        mp4_url = direct_url
+        ts_url = direct_url
     else:
-        ts_url = ""
+        direct_url = ""
+        mp4_url = f"/stream.mp4?v={active_tv_sid}" if active_tv_sid and stream_url else ""
+        if active_tv_sid and stream_url:
+            if "/lsm/" in stream_url or ".m3u8" in stream_url:
+                ts_url = stream_url if stream_url.startswith("/") else (stream_url.replace(f"http://{LOCAL_IP}:{SERVER_PORT}", "") if stream_url.startswith(f"http://{LOCAL_IP}:{SERVER_PORT}") else stream_url)
+            else:
+                ts_url = f"/stream.ts?v={active_tv_sid}"
+        else:
+            ts_url = ""
     opts = dict(app_state.get("opts") or {})
     if "speed" not in opts or not opts["speed"]:
         opts["speed"] = "1.0x"
@@ -2988,6 +3108,11 @@ def build_tv_state_payload():
         "stream_url": stream_url,
         "mp4_url": mp4_url,
         "ts_url": ts_url,
+        "direct_stream": is_direct,
+        "direct_kind": direct_kind if is_direct else "",
+        "direct_url": direct_url,
+        "cdn_url": cdn_url,
+        "direct_headers": direct_headers,
         "session_id": active_tv_sid,
         "stream_offset": float(info.get("stream_offset") or 0),
         "is_active_download": bool(info.get("active")),
@@ -3025,7 +3150,9 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self):
         if self.path.startswith("/stream.ts"):
             self.serve_stream(send_body=False)
-        elif self.path.startswith("/lsm/"):
+        elif self.path.startswith("/direct/stream"):
+            self.serve_direct_stream(send_body=False)
+        elif self.path.startswith("/direct/hls.m3u8") or self.path.startswith("/lsm/"):
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.apple.mpegurl")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -3072,6 +3199,10 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.serve_stream(send_body=True)
         elif clean.startswith("/stream.mp4"):
             self.serve_stream_mp4()
+        elif clean == "/direct/hls.m3u8":
+            self.serve_direct_hls()
+        elif clean == "/direct/stream":
+            self.serve_direct_stream(send_body=True)
         elif clean == "/lsm/master.m3u8":
             self.serve_lsm_playlist()
         else:
@@ -3118,7 +3249,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             if action == "set_speed":
                 spd = data.get("speed", "1.0x")
                 opts["speed"] = spd
-                if not url:
+                info = active_sessions.get(current_session_id) or {}
+                if not url or info.get("direct_stream"):
                     _issue_tv_command("speed", target=spd)
                     self.send_json({"ok": True, "speed": spd})
                     return
@@ -3158,7 +3290,9 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 info = active_sessions.get(current_session_id) or {}
                 spd = opts.get("speed", "1.0x")
                 stream_offset = float(info.get("stream_offset") or 0)
-                if from_tv and url:
+                if info.get("direct_stream"):
+                    tv_seek(target_sec)
+                elif from_tv and url:
                     if not info.get("active") and spd in ("1.0x", "1.0", "1") and target_sec >= stream_offset and os.path.exists(info.get("file", "")):
                         tv_player_state["position"] = float(target_sec)
                         _issue_tv_command("load", target={
@@ -3316,6 +3450,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         elif clean == "/api/settings":
             if "autonext" in data:
                 settings["autonext"] = bool(data["autonext"])
+            if "direct_stream" in data:
+                settings["direct_stream"] = bool(data["direct_stream"])
             save_settings()
             self.send_json(settings)
 
@@ -3688,6 +3824,108 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    def serve_direct_hls(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        v_raw = query.get("v", [None])[0]
+        u_b64 = query.get("u", [None])[0]
+        try:
+            sid = int(v_raw) if v_raw else current_session_id
+        except Exception:
+            sid = current_session_id
+        ds = _direct_sessions.get(sid) or _direct_sessions.get(current_session_id)
+        if not ds and not u_b64:
+            self.send_error(404, "Direct HLS session not found")
+            return
+        target_url = _b64_decode_url(u_b64) if u_b64 else ds.get("url", "")
+        if not target_url:
+            self.send_error(404, "Missing upstream HLS URL")
+            return
+        req_headers = dict((ds or {}).get("headers") or {"User-Agent": "Mozilla/5.0"})
+        final_url = resolve_redirects(target_url, req_headers)
+        m3u8_text = curl_fetch(final_url, req_headers, max_time=10)
+        if not m3u8_text:
+            self.send_error(502, "Upstream HLS playlist empty")
+            return
+        rewritten = rewrite_hls_playlist(m3u8_text, final_url, sid)
+        body = rewritten.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_direct_stream(self, send_body=True):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        v_raw = query.get("v", [None])[0]
+        u_b64 = query.get("u", [None])[0]
+        try:
+            sid = int(v_raw) if v_raw else current_session_id
+        except Exception:
+            sid = current_session_id
+        ds = _direct_sessions.get(sid) or _direct_sessions.get(current_session_id)
+        if not ds and not u_b64:
+            self.send_error(404, "Direct stream session not found")
+            return
+        target_url = _b64_decode_url(u_b64) if u_b64 else ds.get("url", "")
+        if not target_url:
+            self.send_error(404, "Missing upstream stream URL")
+            return
+        hdrs = dict(DL_HEADERS)
+        if ds and ds.get("headers"):
+            hdrs.update(ds["headers"])
+        if "Range" in self.headers:
+            hdrs["Range"] = self.headers["Range"]
+        session_info = active_sessions.get(sid)
+        cancel_event = session_info.get("cancel_event") if session_info else threading.Event()
+        try:
+            req = urllib.request.Request(target_url, headers=hdrs)
+            with urlopen_fast(req, timeout=20) as r:
+                self.send_response(r.status)
+                ctype = r.headers.get("Content-Type") or ("video/mp2t" if ".ts" in target_url else "video/mp4")
+                self.send_header("Content-Type", ctype)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                for k in ("Content-Length", "Content-Range", "Accept-Ranges"):
+                    if r.headers.get(k):
+                        self.send_header(k, r.headers.get(k))
+                if not r.headers.get("Accept-Ranges"):
+                    self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                if not send_body:
+                    return
+                while not cancel_event.is_set():
+                    buf = r.read(256 * 1024)
+                    if not buf:
+                        break
+                    self.wfile.write(buf)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except urllib.error.HTTPError as he:
+            try:
+                self.send_error(he.code, str(he.reason))
+            except Exception:
+                pass
+        except Exception:
+            # Fallback to curl_fetch_bytes for TS segments if urllib fails on custom TLS/DNS
+            if send_body and (".ts" in target_url or u_b64):
+                data = curl_fetch_bytes(target_url, hdrs, max_time=20)
+                if data:
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "video/mp2t")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+                    except Exception:
+                        pass
+            try:
+                self.send_error(502, "Direct upstream error")
+            except Exception:
+                pass
 
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
