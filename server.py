@@ -456,15 +456,20 @@ def _notify_tv_listeners():
 
 def adb_launch_tv_player():
     """If adb is installed and connected to TV['ip'], wake screen and bring TV Caster Player to foreground."""
-    adb_bin = shutil.which("adb")
-    if not adb_bin:
+    adb_bin = shutil.which("adb") or os.path.expanduser("~/.local/bin/adb")
+    if not adb_bin or not os.path.exists(adb_bin):
         return
     tv_ip = TV.get("ip") or TV_IP
     target = f"{tv_ip}:5555"
+    server_url = f"http://{LOCAL_IP}:{SERVER_PORT}/tv"
     try:
         subprocess.run([adb_bin, "connect", target], capture_output=True, timeout=3)
         subprocess.run([adb_bin, "-s", target, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=2)
-        subprocess.run([adb_bin, "-s", target, "shell", "am", "start", "-n", "com.tvcaster.player/.MainActivity"], capture_output=True, timeout=3)
+        subprocess.run(
+            [adb_bin, "-s", target, "shell", "am", "start", "-n", "com.tvcaster.player/.MainActivity", "-e", "server_url", server_url],
+            capture_output=True,
+            timeout=3,
+        )
     except Exception:
         pass
 
