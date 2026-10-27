@@ -179,28 +179,28 @@ body.native-bridge #tv-video {
 /* Main Player Overlay Bar (Supports Bottom or Top docking) */
 .tv-overlay {
   position: fixed;
-  left: var(--safe-x);
-  right: var(--safe-x);
+  left: 3vw;
+  right: 3vw;
   z-index: 20;
   background: var(--panel-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--panel-border);
-  border-radius: 22px;
-  padding: 22px 28px;
+  border-radius: 18px;
+  padding: 14px 18px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
   transition: opacity 0.3s ease, transform 0.3s ease;
 }
 
 .tv-overlay.dock-bottom {
-  bottom: var(--safe-y);
+  bottom: 3vh;
   top: auto;
 }
 
 .tv-overlay.dock-top {
-  top: var(--safe-y);
+  top: 3vh;
   bottom: auto;
 }
 
@@ -219,18 +219,19 @@ body.native-bridge #tv-video {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 20px;
+  gap: 12px;
 }
 
 .media-title-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
+  flex: 1;
 }
 
 .media-title {
-  font-size: 1.45rem;
+  font-size: 1.15rem;
   font-weight: 700;
   color: var(--text);
   white-space: nowrap;
@@ -239,19 +240,20 @@ body.native-bridge #tv-video {
 }
 
 .media-meta {
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 0.85rem;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
   font-weight: 600;
   background: rgba(56, 189, 248, 0.16);
   color: var(--primary);
@@ -262,9 +264,9 @@ body.native-bridge #tv-video {
 .timeline-row {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 8px 12px;
-  border-radius: 14px;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 12px;
   border: 2px solid transparent;
   transition: all 0.18s ease;
   cursor: pointer;
@@ -279,16 +281,16 @@ body.native-bridge #tv-video {
 }
 
 .time-label {
-  font-size: 1.05rem;
+  font-size: 0.88rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  min-width: 82px;
+  min-width: 68px;
   text-align: center;
 }
 
 .timeline-track {
   flex: 1;
-  height: 10px;
+  height: 8px;
   background: rgba(255, 255, 255, 0.18);
   border-radius: 999px;
   position: relative;
@@ -319,8 +321,8 @@ body.native-bridge #tv-video {
   position: absolute;
   top: 50%;
   left: 0%;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #fff;
   border: 3px solid var(--primary);
@@ -338,56 +340,61 @@ body.native-bridge #tv-video {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  flex-wrap: nowrap;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .controls-group {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .tv-btn {
   appearance: none;
-  border: 2px solid rgba(255, 255, 255, 0.12);
-  background: rgba(30, 41, 59, 0.85);
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  background: rgba(30, 41, 59, 0.88);
   color: var(--text);
-  padding: 12px 20px;
-  border-radius: 14px;
-  font-size: 1.05rem;
+  padding: 7px 11px;
+  border-radius: 10px;
+  font-size: 0.82rem;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   cursor: pointer;
   transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
   white-space: nowrap;
 }
 
 .tv-btn .btn-sub {
-  font-size: 0.88rem;
+  font-size: 0.76rem;
   color: var(--primary);
   font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
   background: rgba(56, 189, 248, 0.15);
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tv-btn.focused,
 .tv-btn:focus {
   outline: none;
   border-color: var(--primary);
-  background: rgba(56, 189, 248, 0.22);
-  transform: scale(1.06);
-  box-shadow: 0 0 24px var(--primary-glow);
+  background: rgba(56, 189, 248, 0.24);
+  transform: scale(1.05);
+  box-shadow: 0 0 18px var(--primary-glow);
   z-index: 2;
 }
 
 .tv-btn.primary-play {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.3), rgba(129, 140, 248, 0.3));
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.32), rgba(129, 140, 248, 0.32));
   border-color: rgba(56, 189, 248, 0.45);
-  padding: 12px 26px;
+  padding: 7px 14px;
 }
 
 /* Modal Popover Sheets (Episodes, Voice Acting, Quality, Speed) */

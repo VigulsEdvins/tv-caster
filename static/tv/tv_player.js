@@ -341,7 +341,8 @@
     if (voiceTitle) {
       badgeVoice.style.display = "inline-flex";
       badgeVoice.textContent = voiceTitle;
-      subVoice.textContent = voiceTitle.slice(0, 16);
+      const shortVoice = voiceTitle.replace(/\s*\(.*?\)\s*/g, "").trim();
+      subVoice.textContent = (shortVoice || voiceTitle).slice(0, 12);
     } else if (data.audio_tracks && data.audio_tracks.length > 0) {
       const tr = data.audio_tracks[data.audio_index || 0] || data.audio_tracks[0];
       const label = tr.lang ? tr.lang.toUpperCase() : "Дорожка " + (tr.n + 1);

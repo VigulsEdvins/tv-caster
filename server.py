@@ -2127,6 +2127,11 @@ def build_tv_state_payload():
         opts["speed"] = "1.0x"
     if "quality" not in opts or not opts["quality"]:
         opts["quality"] = "720p"
+    dur = float(tv_player_state.get("duration") or 0)
+    if dur >= 43200 or (dur == 0 and info.get("file") and not info.get("active") and os.path.exists(info["file"])):
+        probed = probe_duration(path=info.get("file") or CURRENT_FILE)
+        tv_player_state["duration"] = probed if 0 < probed < 43200 else 0.0
+        dur = tv_player_state["duration"]
     return {
         "status": app_state.get("status", "idle"),
         "stage": app_state.get("stage", "extract"),
@@ -2142,7 +2147,7 @@ def build_tv_state_payload():
         "download_speed": app_state.get("download_speed", "0 MB/s"),
         "tv_state": tv_player_state.get("state", "STOPPED"),
         "position": float(tv_player_state.get("position") or 0),
-        "duration": float(tv_player_state.get("duration") or 0),
+        "duration": dur,
         "volume": int(tv_player_state.get("volume", 80)),
         "episode": app_state.get("episode"),
         "seasons": cached.get("seasons", []),
