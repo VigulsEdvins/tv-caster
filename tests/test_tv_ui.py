@@ -67,6 +67,9 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn("switch_translation", js)
         self.assertIn("switch_quality", js)
         self.assertIn("set_speed", js)
+        self.assertIn("renderHistoryCarousel", js)
+        self.assertIn("openHistoryItemModal", js)
+        self.assertIn("cast_from_tv", js)
 
         js_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "tv", "tv_player.js")
         node_bin = "/home/edvins/.local/bin/node"

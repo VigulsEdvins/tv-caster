@@ -46,6 +46,16 @@
   const modalOptionsGrid = document.getElementById("modal-options-grid");
   const actionToast = document.getElementById("action-toast");
 
+  const heroBackdrop = document.getElementById("hero-backdrop");
+  const heroBadge = document.getElementById("hero-badge");
+  const heroTitle = document.getElementById("hero-title");
+  const heroMeta = document.getElementById("hero-meta");
+  const heroProgressWrap = document.getElementById("hero-progress-wrap");
+  const heroProgressFill = document.getElementById("hero-progress-fill");
+  const heroProgressLabel = document.getElementById("hero-progress-label");
+  const homeCloseHint = document.getElementById("home-close-hint");
+  const historyCarousel = document.getElementById("tv-history-carousel");
+
   // Player State
   let serverState = {
     status: "idle",
@@ -90,6 +100,14 @@
   let cachedModalTabs = [];
   let cachedModalBtns = [];
   let cachedModalCols = 3;
+
+  let historyItems = [];
+  let historyCardEls = [];
+  let historyIndex = 0;
+  let lastHistorySignature = "";
+  let homeBrowserOpen = true;
+  let historyInspectCache = {};
+  let activeHistorySeasonIdx = 0;
 
   const row0Els = [document.getElementById("btn-dock")];
   const row1Els = [document.getElementById("timeline-scrubber")];
@@ -226,6 +244,8 @@
       }
     }
     standbyScreen.classList.add("hidden");
+    homeBrowserOpen = false;
+    if (homeCloseHint) homeCloseHint.style.display = "none";
     updatePlayButtonUI(false);
     showOverlay();
     if (!modalOpen) {
@@ -464,9 +484,15 @@
       overlayBufferInfo.textContent = data.status_text || "";
     }
 
+    // Update Netflix History Carousel if history payload is present
+    if (Array.isArray(data.history)) {
+      renderHistoryCarousel(data.history);
+    }
+
     // Standby / Loading states (only show when no stream is currently playing on screen)
     if (!currentSessionId && (data.status === "preparing" || (data.status === "downloading" && !data.stream_url))) {
       standbyScreen.classList.remove("hidden");
+      homeBrowserOpen = true;
       standbyTitle.textContent = data.title || "Подготовка видео…";
       standbySubtitle.textContent = data.status_text || "Пожалуйста, подождите…";
       loadingBox.classList.add("active");
@@ -475,8 +501,11 @@
       loadingBarFill.style.width = (data.download_progress || 10) + "%";
     } else if (data.status === "error") {
       standbyScreen.classList.remove("hidden");
+      homeBrowserOpen = true;
       standbyTitle.textContent = data.error || "Ошибка воспроизведения";
       standbySubtitle.textContent = data.error_hint || "Попробуйте выбрать другое качество или озвучку.";
+      loadingBox.classList.remove("active");
+    } else if (data.status === "playing" || data.status === "paused") {
       loadingBox.classList.remove("active");
     }
 
@@ -508,9 +537,14 @@
           videoEl.removeAttribute("src");
         }
         standbyScreen.classList.remove("hidden");
+        homeBrowserOpen = true;
+        if (homeCloseHint) homeCloseHint.style.display = "none";
         loadingBox.classList.remove("active");
-        standbyTitle.textContent = "TV Caster Ready";
-        standbySubtitle.textContent = "Воспроизведение остановлено.";
+        standbyTitle.textContent = "TV Caster";
+        standbySubtitle.textContent = "Воспроизведение остановлено. Выберите сериал или фильм из истории.";
+        if (historyCardEls.length) {
+          focusHistoryCard(historyIndex);
+        }
       }
     } else if (data.session_id && data.stream_url && currentSessionId !== data.session_id) {
       // Auto-attach if TV opened mid-session
@@ -703,6 +737,405 @@
     resetOverlayTimer();
   }
 
+  // Netflix Home Screen & History Carousel
+  function updateHeroSpotlight(item) {
+    if (!item || !heroTitle) return;
+    heroTitle.textContent = item.series_title || item.title || "Без названия";
+    if (heroBadge) {
+      if (item.episode) {
+        heroBadge.textContent = "СЕРИАЛ • " + String(item.episode).toUpperCase();
+      } else if (item.is_series) {
+        heroBadge.textContent = "СЕРИАЛ";
+      } else {
+        heroBadge.textContent = "ФИЛЬМ";
+      }
+    }
+    const metaParts = [];
+    if (item.episode) {
+      metaParts.push("Остановились на: " + String(item.episode).toUpperCase());
+    }
+    if (item.translation_title) {
+      metaParts.push("Озвучка: " + item.translation_title);
+    }
+    if (item.quality) {
+      metaParts.push(item.quality);
+    }
+    if (item.position > 0) {
+      metaParts.push("Позиция: " + formatTime(item.position));
+    }
+    if (heroMeta) {
+      heroMeta.textContent = metaParts.join("  •  ") || item.title || "";
+    }
+    if (heroBackdrop) {
+      if (item.thumb) {
+        heroBackdrop.style.backgroundImage = `url("${item.thumb}")`;
+      } else {
+        heroBackdrop.style.backgroundImage = "none";
+      }
+    }
+    if (heroProgressWrap && heroProgressFill && heroProgressLabel) {
+      if (item.position > 0 || item.duration > 0) {
+        heroProgressWrap.style.display = "flex";
+        heroProgressFill.style.width = (item.progress_pct || 0) + "%";
+        heroProgressLabel.textContent =
+          formatTime(item.position || 0) +
+          (item.duration > 0 ? " / " + formatTime(item.duration) + ` (${item.progress_pct || 0}%)` : "");
+      } else {
+        heroProgressWrap.style.display = "none";
+      }
+    }
+  }
+
+  function focusHistoryCard(idx) {
+    if (!historyCardEls.length) return;
+    historyIndex = Math.max(0, Math.min(historyCardEls.length - 1, idx));
+    const card = historyCardEls[historyIndex];
+    setFocus(card);
+    try {
+      card.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    } catch (_) {}
+    if (historyItems[historyIndex]) {
+      updateHeroSpotlight(historyItems[historyIndex]);
+    }
+  }
+
+  function renderHistoryCarousel(items) {
+    if (!historyCarousel) return;
+    historyItems = Array.isArray(items) ? items : [];
+    const sig = historyItems
+      .map((it) => `${it.url}|${it.episode || ""}|${Math.floor(it.position || 0)}|${it.thumb || ""}`)
+      .join(";;");
+    if (sig === lastHistorySignature && historyCardEls.length === historyItems.length) {
+      return;
+    }
+    lastHistorySignature = sig;
+    historyCarousel.innerHTML = "";
+    historyCardEls = [];
+
+    if (!historyItems.length) {
+      const empty = document.createElement("div");
+      empty.style.color = "#94a3b8";
+      empty.style.padding = "12px 4px";
+      empty.textContent = "История просмотров пока пуста. Включите фильм или сериал с телефона или ноутбука.";
+      historyCarousel.appendChild(empty);
+      return;
+    }
+
+    historyItems.forEach((item, idx) => {
+      const card = document.createElement("button");
+      card.className = "tv-history-card focusable";
+      card.type = "button";
+
+      if (item.thumb) {
+        const img = document.createElement("img");
+        img.className = "tv-history-card-thumb";
+        img.src = item.thumb;
+        img.alt = item.series_title || item.title || "";
+        img.loading = "lazy";
+        card.appendChild(img);
+      }
+
+      const grad = document.createElement("div");
+      grad.className = "tv-history-card-gradient";
+      card.appendChild(grad);
+
+      const badge = document.createElement("div");
+      badge.className = "tv-history-card-badge";
+      badge.textContent = item.episode ? String(item.episode).toUpperCase() : item.is_series ? "СЕРИАЛ" : "ФИЛЬМ";
+      card.appendChild(badge);
+
+      const body = document.createElement("div");
+      body.className = "tv-history-card-body";
+
+      const titleEl = document.createElement("div");
+      titleEl.className = "tv-history-card-title";
+      titleEl.textContent = item.series_title || item.title || "Без названия";
+      body.appendChild(titleEl);
+
+      const subEl = document.createElement("div");
+      subEl.className = "tv-history-card-sub";
+      const subParts = [];
+      if (item.episode) subParts.push(String(item.episode).toUpperCase());
+      if (item.position > 0) subParts.push("с " + formatTime(item.position));
+      if (item.translation_title) subParts.push(item.translation_title);
+      subEl.textContent = subParts.join(" • ") || "Смотреть";
+      body.appendChild(subEl);
+
+      card.appendChild(body);
+
+      if (item.progress_pct > 0) {
+        const progTrack = document.createElement("div");
+        progTrack.className = "tv-history-card-progress";
+        const progFill = document.createElement("div");
+        progFill.className = "tv-history-card-progress-fill";
+        progFill.style.width = Math.min(100, Math.max(5, item.progress_pct)) + "%";
+        progTrack.appendChild(progFill);
+        card.appendChild(progTrack);
+      }
+
+      card.addEventListener("focus", () => {
+        historyIndex = idx;
+        updateHeroSpotlight(item);
+      });
+
+      card.addEventListener("click", () => {
+        historyIndex = idx;
+        updateHeroSpotlight(item);
+        openHistoryItemModal(item, card);
+      });
+
+      historyCarousel.appendChild(card);
+      historyCardEls.push(card);
+    });
+
+    if (historyIndex >= historyCardEls.length) {
+      historyIndex = 0;
+    }
+    updateHeroSpotlight(historyItems[historyIndex]);
+    if (!standbyScreen.classList.contains("hidden") && !modalOpen) {
+      focusHistoryCard(historyIndex);
+    }
+  }
+
+  function openHistoryBrowser() {
+    homeBrowserOpen = true;
+    standbyScreen.classList.remove("hidden");
+    if (homeCloseHint) {
+      homeCloseHint.style.display = currentSessionId ? "block" : "none";
+    }
+    overlayEl.classList.add("hidden");
+    overlayVisible = false;
+    fetch("/api/tv/history")
+      .then((r) => r.json())
+      .then((res) => {
+        if (res && Array.isArray(res.items)) {
+          renderHistoryCarousel(res.items);
+        }
+        if (historyCardEls.length) {
+          focusHistoryCard(historyIndex);
+        }
+      })
+      .catch(() => {
+        if (historyCardEls.length) {
+          focusHistoryCard(historyIndex);
+        }
+      });
+  }
+
+  function closeHistoryBrowser() {
+    if (!currentSessionId) return;
+    homeBrowserOpen = false;
+    standbyScreen.classList.add("hidden");
+    if (homeCloseHint) homeCloseHint.style.display = "none";
+    showOverlay();
+    setFocus(document.getElementById("btn-history") || document.getElementById("btn-play"));
+  }
+
+  function castFromTv(item, episodeId, startAtSec) {
+    closeModal();
+    standbyScreen.classList.remove("hidden");
+    homeBrowserOpen = true;
+    loadingBox.classList.add("active");
+    const epLabel = episodeId ? " (" + String(episodeId).toUpperCase() + ")" : "";
+    loadingStatusText.textContent = `Запуск: ${item.series_title || item.title}${epLabel}…`;
+    loadingSpeedText.textContent = startAtSec > 0 ? "с " + formatTime(startAtSec) : "с начала";
+    loadingBarFill.style.width = "15%";
+    showToast(`🎬 Запускаю ${item.series_title || item.title}${epLabel}…`);
+    postAction({
+      action: "cast_from_tv",
+      url: item.url,
+      episode: episodeId || null,
+      start_at: Math.max(0, Math.floor(startAtSec || 0)),
+      quality: item.quality || (serverState.opts && serverState.opts.quality) || "720p",
+      speed: item.speed || (serverState.opts && serverState.opts.speed) || "1.0x",
+      translation_id: item.translation_id || null,
+      translation_title: item.translation_title || null,
+    });
+  }
+
+  function openHistoryItemModal(item, triggerEl) {
+    if (!item) return;
+    modalReturnFocus = triggerEl || focusedEl;
+    modalOpen = true;
+    modalBackdrop.classList.add("open");
+    modalSeasonTabs.style.display = "none";
+    modalSeasonTabs.innerHTML = "";
+    modalOptionsGrid.innerHTML = "";
+
+    const epTag = item.episode ? ` (${String(item.episode).toUpperCase()})` : "";
+    modalTitle.textContent = `🎬 ${item.series_title || item.title}${epTag}`;
+
+    // Option 1: Continue watching from saved position
+    const resumePos = Math.floor(item.position || 0);
+    const resumeBtn = document.createElement("button");
+    resumeBtn.className = "modal-option-btn active";
+    const resumeRight =
+      resumePos > 0
+        ? `${item.episode ? String(item.episode).toUpperCase() + " • " : ""}${formatTime(resumePos)}`
+        : item.episode
+          ? String(item.episode).toUpperCase()
+          : "▶";
+    resumeBtn.innerHTML = `<span>▶ Продолжить просмотр</span><span>${resumeRight}</span>`;
+    resumeBtn.onclick = () => {
+      castFromTv(item, item.episode, resumePos);
+    };
+    modalOptionsGrid.appendChild(resumeBtn);
+
+    // Option 2: Choose season and episode
+    const pickEpBtn = document.createElement("button");
+    pickEpBtn.className = "modal-option-btn";
+    const watchedCount = item.watched_episodes ? Object.keys(item.watched_episodes).length : 0;
+    pickEpBtn.innerHTML = `<span>🎬 Выбрать сезон и серию</span><span>${watchedCount > 0 ? watchedCount + " просм." : "Список"}</span>`;
+    pickEpBtn.onclick = () => {
+      openHistoryEpisodePicker(item, triggerEl);
+    };
+    modalOptionsGrid.appendChild(pickEpBtn);
+
+    // Option 3: Watch from beginning (00:00)
+    if (resumePos > 15) {
+      const restartBtn = document.createElement("button");
+      restartBtn.className = "modal-option-btn";
+      restartBtn.innerHTML = `<span>🔄 Смотреть сначала</span><span>00:00:00</span>`;
+      restartBtn.onclick = () => {
+        castFromTv(item, item.episode, 0);
+      };
+      modalOptionsGrid.appendChild(restartBtn);
+    }
+
+    cachedModalTabs = [];
+    cachedModalBtns = Array.from(modalOptionsGrid.querySelectorAll(".modal-option-btn"));
+    cachedModalCols = 1;
+    modalZone = "grid";
+    modalGridIndex = 0;
+    setFocus(cachedModalBtns[0]);
+  }
+
+  function renderHistoryEpisodesModal(item, seasons, triggerEl) {
+    modalReturnFocus = triggerEl || focusedEl;
+    modalOpen = true;
+    modalBackdrop.classList.add("open");
+    modalSeasonTabs.style.display = "none";
+    modalSeasonTabs.innerHTML = "";
+    modalOptionsGrid.innerHTML = "";
+    modalTitle.textContent = `🎬 ${item.series_title || item.title} — Выбор серии`;
+
+    if (!seasons || !seasons.length) {
+      renderEmptyModal("Для этого видео список сезонов и серий не найден.");
+      return;
+    }
+
+    if (activeHistorySeasonIdx >= seasons.length) {
+      activeHistorySeasonIdx = 0;
+    }
+
+    if (seasons.length > 1) {
+      modalSeasonTabs.style.display = "flex";
+      seasons.forEach((s, idx) => {
+        const tab = document.createElement("button");
+        tab.className = "tv-btn modal-tab" + (idx === activeHistorySeasonIdx ? " active" : "");
+        tab.textContent = s.title || `Сезон ${s.id || idx + 1}`;
+        tab.onclick = () => {
+          activeHistorySeasonIdx = idx;
+          renderHistoryEpisodesModal(item, seasons, triggerEl);
+        };
+        modalSeasonTabs.appendChild(tab);
+      });
+    }
+
+    const watchedMap = item.watched_episodes || {};
+    const episodes = (seasons[activeHistorySeasonIdx] && seasons[activeHistorySeasonIdx].episodes) || [];
+    episodes.forEach((ep) => {
+      const btn = document.createElement("button");
+      const isLastWatched = String(ep.id) === String(item.episode);
+      const wInfo = watchedMap[ep.id];
+      btn.className = "modal-option-btn" + (isLastWatched ? " active" : "");
+      let statusBadge = "▶";
+      if (wInfo && wInfo.position > 0) {
+        statusBadge = "⏱ " + formatTime(wInfo.position);
+      } else if (isLastWatched) {
+        statusBadge = "✓ Текущая";
+      }
+      btn.innerHTML = `<span>${ep.title || ep.id}</span><span>${statusBadge}</span>`;
+      btn.onclick = () => {
+        const savedPos = wInfo && wInfo.position > 30 ? Math.floor(wInfo.position) : 0;
+        if (savedPos > 30) {
+          // Offer resume or start from 00:00 for this specific episode
+          const subItem = Object.assign({}, item, {
+            episode: ep.id,
+            position: savedPos,
+            duration: wInfo.duration || 0,
+          });
+          openHistoryItemModal(subItem, triggerEl);
+        } else {
+          castFromTv(item, ep.id, 0);
+        }
+      };
+      modalOptionsGrid.appendChild(btn);
+    });
+
+    cachedModalTabs = Array.from(modalSeasonTabs.querySelectorAll(".modal-tab"));
+    cachedModalBtns = Array.from(modalOptionsGrid.querySelectorAll(".modal-option-btn"));
+    if (cachedModalBtns.length) {
+      modalZone = "grid";
+      const activeIdx = cachedModalBtns.findIndex((b) => b.classList.contains("active"));
+      modalGridIndex = activeIdx >= 0 ? activeIdx : 0;
+      setFocus(cachedModalBtns[modalGridIndex]);
+      requestAnimationFrame(() => {
+        if (cachedModalBtns[0]) {
+          cachedModalCols = Math.max(1, Math.round(modalOptionsGrid.clientWidth / (cachedModalBtns[0].offsetWidth || 220)));
+        }
+      });
+    }
+  }
+
+  function openHistoryEpisodePicker(item, triggerEl) {
+    // If the currently loaded show on server matches this URL and already has seasons, use them immediately
+    if (serverState.url === item.url && serverState.seasons && serverState.seasons.length) {
+      const foundIdx = serverState.seasons.findIndex((s) =>
+        (s.episodes || []).some((e) => String(e.id) === String(item.episode))
+      );
+      activeHistorySeasonIdx = foundIdx >= 0 ? foundIdx : 0;
+      renderHistoryEpisodesModal(item, serverState.seasons, triggerEl);
+      return;
+    }
+
+    if (historyInspectCache[item.url]) {
+      const seasons = historyInspectCache[item.url];
+      const foundIdx = seasons.findIndex((s) =>
+        (s.episodes || []).some((e) => String(e.id) === String(item.episode))
+      );
+      activeHistorySeasonIdx = foundIdx >= 0 ? foundIdx : 0;
+      renderHistoryEpisodesModal(item, seasons, triggerEl);
+      return;
+    }
+
+    modalTitle.textContent = `⏳ Загрузка списка серий: ${item.series_title || item.title}…`;
+    modalSeasonTabs.style.display = "none";
+    modalOptionsGrid.innerHTML = "";
+    renderEmptyModal("Запрашиваем список сезонов и серий…");
+
+    fetch("/api/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: item.url }),
+    })
+      .then((r) => r.json())
+      .then((res) => {
+        const seasons = (res && res.seasons) || [];
+        if (seasons.length) {
+          historyInspectCache[item.url] = seasons;
+        }
+        const foundIdx = seasons.findIndex((s) =>
+          (s.episodes || []).some((e) => String(e.id) === String(item.episode))
+        );
+        activeHistorySeasonIdx = foundIdx >= 0 ? foundIdx : 0;
+        renderHistoryEpisodesModal(item, seasons, triggerEl);
+      })
+      .catch(() => {
+        renderEmptyModal("Не удалось загрузить список серий.");
+      });
+  }
+
   // Button Click Bindings
   document.querySelectorAll("#tv-overlay .focusable").forEach((el) => {
     el.addEventListener("click", () => {
@@ -719,6 +1152,8 @@
       } else if (action === "next-ep") {
         showToast("⏭ Следующая серия…");
         postAction({ action: "next_episode" });
+      } else if (action === "open-history") {
+        openHistoryBrowser();
       } else if (action === "open-episodes") {
         openModal("episodes", el);
       } else if (action === "open-voices") {
@@ -820,6 +1255,30 @@
           if (modalGridIndex + cols < gridBtns.length) {
             modalGridIndex += cols;
             setFocus(gridBtns[modalGridIndex]);
+          }
+        }
+      }
+      return;
+    }
+
+    // 1.5 Netflix Home / History Screen Navigation (when standby screen is visible)
+    if (!standbyScreen.classList.contains("hidden")) {
+      if (dir === "BACK") {
+        if (currentSessionId) {
+          closeHistoryBrowser();
+        }
+        return;
+      }
+      if (historyCardEls.length) {
+        if (dir === "LEFT") {
+          focusHistoryCard(historyIndex - 1);
+        } else if (dir === "RIGHT") {
+          focusHistoryCard(historyIndex + 1);
+        } else if (dir === "UP" || dir === "DOWN") {
+          focusHistoryCard(historyIndex);
+        } else if (dir === "ENTER") {
+          if (historyCardEls[historyIndex]) {
+            historyCardEls[historyIndex].click();
           }
         }
       }
