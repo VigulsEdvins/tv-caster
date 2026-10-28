@@ -432,13 +432,24 @@
       const seasons = seriesData.seasons;
       if (!seasons.some(x => x.id === sel.seasonId)) sel.seasonId = seasons[0].id;
       const season = seasons.find(x => x.id === sel.seasonId);
+      const watchedEps = (seriesData && seriesData.watched_episodes) || {};
       renderChips($('seasonsChips'), seasons.map(x => x.id), sel.seasonId,
         id => { sel.seasonId = id; sel.episodeId = null; renderSeries(); },
-        id => seasons.find(x => x.id === id).title);
+        id => {
+          const sObj = seasons.find(x => x.id === id);
+          const wCnt = (sObj.episodes || []).filter(e => watchedEps[e.id] && (watchedEps[e.id].position > 10 || watchedEps[e.id].completed)).length;
+          return wCnt > 0 ? `${sObj.title} (${wCnt}✓)` : sObj.title;
+        });
       if (!season.episodes.some(e => e.id === sel.episodeId)) sel.episodeId = season.episodes.length ? season.episodes[0].id : null;
       renderChips($('episodesChips'), season.episodes.map(e => e.id), sel.episodeId,
         id => { sel.episodeId = id; renderSeries(); },
-        id => season.episodes.find(e => e.id === id).title.replace(/^\D+/, '') || id);
+        id => {
+          const baseNum = season.episodes.find(e => e.id === id).title.replace(/^\D+/, '') || id;
+          const w = watchedEps[id];
+          if (w && (w.completed || w.progress_pct >= 90)) return baseNum + ' ✓';
+          if (w && w.position > 10) return baseNum + ' ⏱';
+          return baseNum;
+        });
       $('episodesChips').querySelectorAll('.chip').forEach(c => c.classList.add('num'));
       const active = $('episodesChips').querySelector('.chip.active');
       if (active) active.scrollIntoView({ block: 'nearest' });
@@ -464,11 +475,18 @@
             if (pendingSel.voice) sel.voiceTitle = pendingSel.voice;
           }
           if (seriesData && !(pendingSel && pendingSel.episode)) {
-            // a link like .../2-season/5-episode preselects that episode
-            const mm = url.match(/(\d+)-season\/(\d+)-episode/);
-            if (mm) {
-              const sid = 's' + mm[1].padStart(2, '0'), eid = sid + 'e' + mm[2].padStart(2, '0');
-              if (seriesData.seasons.some(x => x.episodes.some(e => e.id === eid))) { sel.seasonId = sid; sel.episodeId = eid; }
+            if (data.last_watched && data.last_watched.episode) {
+              const lwEp = data.last_watched.episode;
+              const sn = seriesData.seasons.find(x => x.episodes.some(e => e.id === lwEp));
+              if (sn) { sel.seasonId = sn.id; sel.episodeId = lwEp; }
+              if (data.last_watched.translation_title) sel.voiceTitle = data.last_watched.translation_title;
+            } else {
+              // a link like .../2-season/5-episode preselects that episode
+              const mm = url.match(/(\d+)-season\/(\d+)-episode/);
+              if (mm) {
+                const sid = 's' + mm[1].padStart(2, '0'), eid = sid + 'e' + mm[2].padStart(2, '0');
+                if (seriesData.seasons.some(x => x.episodes.some(e => e.id === eid))) { sel.seasonId = sid; sel.episodeId = eid; }
+              }
             }
           }
           pendingSel = null;

@@ -273,15 +273,18 @@ def add_history(title, url, episode=None, **extra):
         _save_history(hist[:HISTORY_LIMIT])
 
 def update_history(url, episode=None, **fields):
+    clean_fields = {k: v for k, v in fields.items() if v is not None}
+    if not clean_fields:
+        return
     with history_lock:
         hist = load_history()
         updated = False
         for h in hist:
-            if episode is None and "thumb" in fields and h.get("url") == url:
-                h.update(fields)
+            if episode is None and "thumb" in clean_fields and h.get("url") == url:
+                h.update(clean_fields)
                 updated = True
             elif _same(h, url, episode):
-                h.update(fields)
+                h.update(clean_fields)
                 _save_history(hist)
                 return
         if updated:
@@ -319,9 +322,15 @@ def build_tv_history_payload(raw_history=None) -> list:
             group["thumb"] = h.get("thumb")
         ep = h.get("episode")
         if ep and ep not in group["watched_episodes"]:
+            ep_pos = float(h.get("position") or 0)
+            ep_dur = float(h.get("duration") or 0)
+            ep_pct = min(100, max(0, int(round(ep_pos * 100.0 / ep_dur)))) if ep_dur > 0 else 0
+            ep_done = bool(h.get("completed") or (ep_dur > 60 and ep_pos >= ep_dur * 0.90))
             group["watched_episodes"][ep] = {
-                "position": float(h.get("position") or 0),
-                "duration": float(h.get("duration") or 0),
+                "position": ep_pos,
+                "duration": ep_dur,
+                "progress_pct": ep_pct,
+                "completed": ep_done,
                 "timestamp": int(h.get("timestamp") or 0),
             }
     items = []
@@ -331,6 +340,7 @@ def build_tv_history_payload(raw_history=None) -> list:
         pos = float(p.get("position") or 0)
         dur = float(p.get("duration") or 0)
         pct = min(100, max(0, int(round(pos * 100.0 / dur)))) if dur > 0 else 0
+        completed = bool(p.get("completed") or (dur > 60 and pos >= dur * 0.90))
         raw_title = p.get("title") or u
         is_series = bool(
             p.get("episode")
@@ -345,6 +355,7 @@ def build_tv_history_payload(raw_history=None) -> list:
             "position": pos,
             "duration": dur,
             "progress_pct": pct,
+            "completed": completed,
             "thumb": group["thumb"] or "",
             "quality": p.get("quality") or "720p",
             "speed": p.get("speed") or "1.0x",
@@ -1531,6 +1542,22 @@ def inspect_url(url):
             "speeds": speeds
         }
     _inspect_cache[url] = res
+    hist_items = build_tv_history_payload()
+    matched_hist = next((it for it in hist_items if it.get("url") == url), None)
+    if matched_hist:
+        res["last_watched"] = {
+            "episode": matched_hist.get("episode"),
+            "position": matched_hist.get("position", 0),
+            "duration": matched_hist.get("duration", 0),
+            "progress_pct": matched_hist.get("progress_pct", 0),
+            "completed": matched_hist.get("completed", False),
+            "translation_id": matched_hist.get("translation_id"),
+            "translation_title": matched_hist.get("translation_title"),
+        }
+        res["watched_episodes"] = matched_hist.get("watched_episodes", {})
+    else:
+        res["last_watched"] = None
+        res["watched_episodes"] = {}
     _notify_tv_listeners()
     return res
 
@@ -3169,13 +3196,13 @@ def tracker_loop():
                 seen["playing"] = True
                 if dur > 0:
                     seen["rel"], seen["dur"] = rel, dur
-                if dur > 60 and rel > 15 and info.get("resumed", True):
-                    update_history(url, episode, position=rel, duration=dur)
+                if dur > 60 and rel > 5 and info.get("resumed", True):
+                    update_history(url, episode, position=rel, duration=dur, completed=bool(rel >= dur * 0.90))
             elif state in ("STOPPED", "NO_MEDIA_PRESENT") and seen["playing"] and not seen["fired"]:
                 ended = seen["dur"] > 60 and seen["rel"] >= seen["dur"] - 25
                 if ended and not info.get("active"):
                     seen["fired"] = True
-                    update_history(url, episode, position=0)
+                    update_history(url, episode, position=seen["dur"], duration=seen["dur"], completed=True)
                     if settings["autonext"] and neighbor_episode(url, episode, 1):
                         app_state.update(status="preparing", status_text="Включаю следующую серию")
                         cast_neighbor(1)
@@ -3246,6 +3273,9 @@ def build_tv_state_payload():
         first_eps = raw_seasons[0].get("episodes") or []
         if first_eps:
             top_translations = first_eps[0].get("translations") or []
+    hist_payload = build_tv_history_payload()
+    cur_hist_item = next((it for it in hist_payload if it.get("url") == url), None)
+    cur_watched_eps = cur_hist_item.get("watched_episodes", {}) if cur_hist_item else {}
     return {
         "status": app_state.get("status", "idle"),
         "stage": app_state.get("stage", "extract"),
@@ -3283,7 +3313,8 @@ def build_tv_state_payload():
         "last_command": tv_player_state.get("last_command", {"seq": 0, "type": "none", "target": None}),
         "error": app_state.get("last_error", ""),
         "error_hint": app_state.get("error_hint", ""),
-        "history": build_tv_history_payload(),
+        "history": hist_payload,
+        "watched_episodes": cur_watched_eps,
     }
 
 class TVCasterHandler(http.server.BaseHTTPRequestHandler):
@@ -3388,6 +3419,18 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             if "volume" in data and data["volume"] is not None:
                 tv_player_state["volume"] = max(0, min(100, int(data["volume"])))
             tv_player_state["last_report_at"] = time.time()
+            rep_url = app_state.get("url")
+            rep_ep = app_state.get("episode")
+            rep_pos = float(tv_player_state.get("position") or 0)
+            rep_dur = float(tv_player_state.get("duration") or 0)
+            if rep_url and rep_pos >= 5:
+                update_history(
+                    rep_url,
+                    rep_ep,
+                    position=int(rep_pos),
+                    duration=int(rep_dur) if rep_dur > 0 else None,
+                    completed=bool(rep_dur > 60 and rep_pos >= rep_dur * 0.90),
+                )
             self.send_json({"ok": True})
 
         elif clean == "/api/tv/action":
@@ -3492,6 +3535,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 if not url or not ep:
                     self.send_json({"ok": False, "error": "URL or episode missing"})
                     return
+                start_sec = int(float(data.get("start_at") or 0))
                 threading.Thread(
                     target=handle_cast_request,
                     kwargs=dict(
@@ -3499,7 +3543,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                         translation_id=opts.get("translation_id"),
                         quality=opts.get("quality", "720p"),
                         speed=opts.get("speed", "1.0x"),
-                        start_at=0,
+                        start_at=start_sec,
                         audio_idx=app_state.get("audio_index", 0),
                         episode=ep,
                         translation_title=opts.get("translation_title"),

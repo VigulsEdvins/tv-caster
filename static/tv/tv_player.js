@@ -584,12 +584,16 @@
       }
       if (activeSeasonIndex >= seasons.length) activeSeasonIndex = 0;
 
+      const watchedMap = serverState.watched_episodes || {};
       if (seasons.length > 1) {
         modalSeasonTabs.style.display = "flex";
         seasons.forEach((s, idx) => {
           const tab = document.createElement("button");
           tab.className = "tv-btn modal-tab" + (idx === activeSeasonIndex ? " active" : "");
-          tab.textContent = s.title || `Сезон ${s.season || idx + 1}`;
+          const sEps = s.episodes || [];
+          const wCount = sEps.filter((e) => watchedMap[e.id] && (watchedMap[e.id].position > 10 || watchedMap[e.id].completed)).length;
+          const baseTitle = s.title || `Сезон ${s.season || idx + 1}`;
+          tab.textContent = wCount > 0 ? `${baseTitle} (${wCount}/${sEps.length} ✓)` : baseTitle;
           tab.onclick = () => {
             activeSeasonIndex = idx;
             openModal("episodes", modalReturnFocus);
@@ -602,12 +606,26 @@
       episodes.forEach((ep) => {
         const btn = document.createElement("button");
         const isCurrent = String(ep.id) === String(serverState.episode);
-        btn.className = "modal-option-btn" + (isCurrent ? " active" : "");
-        btn.innerHTML = `<span>${ep.title || ep.id}</span><span>${isCurrent ? "✓ Играет" : "▶"}</span>`;
+        const wInfo = watchedMap[ep.id];
+        const isDone = Boolean(wInfo && (wInfo.completed || (wInfo.progress_pct && wInfo.progress_pct >= 90)));
+        btn.className =
+          "modal-option-btn" +
+          (isCurrent ? " active" : "") +
+          (!isCurrent && (isDone || (wInfo && wInfo.position > 10)) ? " watched" : "");
+        let rightLabel = "▶";
+        if (isCurrent) {
+          rightLabel = "▶ Играет";
+        } else if (isDone) {
+          rightLabel = "✓ Просмотрено";
+        } else if (wInfo && wInfo.position > 10) {
+          rightLabel = "⏱ " + formatTime(wInfo.position);
+        }
+        btn.innerHTML = `<span>${ep.title || ep.id}</span><span>${rightLabel}</span>`;
         btn.onclick = () => {
+          const savedPos = wInfo && !isDone && wInfo.position > 30 ? Math.floor(wInfo.position) : 0;
           closeModal();
           showToast(`🎬 Включаю ${ep.title || ep.id}…`);
-          postAction({ action: "switch_episode", episode: ep.id });
+          postAction({ action: "switch_episode", episode: ep.id, start_at: savedPos });
         };
         modalOptionsGrid.appendChild(btn);
       });
@@ -1039,12 +1057,16 @@
       activeHistorySeasonIdx = 0;
     }
 
+    const watchedMap = item.watched_episodes || {};
     if (seasons.length > 1) {
       modalSeasonTabs.style.display = "flex";
       seasons.forEach((s, idx) => {
         const tab = document.createElement("button");
         tab.className = "tv-btn modal-tab" + (idx === activeHistorySeasonIdx ? " active" : "");
-        tab.textContent = s.title || `Сезон ${s.id || idx + 1}`;
+        const sEps = s.episodes || [];
+        const wCount = sEps.filter((e) => watchedMap[e.id] && (watchedMap[e.id].position > 10 || watchedMap[e.id].completed)).length;
+        const baseTitle = s.title || `Сезон ${s.id || idx + 1}`;
+        tab.textContent = wCount > 0 ? `${baseTitle} (${wCount}/${sEps.length} ✓)` : baseTitle;
         tab.onclick = () => {
           activeHistorySeasonIdx = idx;
           renderHistoryEpisodesModal(item, seasons, triggerEl);
@@ -1053,18 +1075,25 @@
       });
     }
 
-    const watchedMap = item.watched_episodes || {};
     const episodes = (seasons[activeHistorySeasonIdx] && seasons[activeHistorySeasonIdx].episodes) || [];
     episodes.forEach((ep) => {
       const btn = document.createElement("button");
       const isLastWatched = String(ep.id) === String(item.episode);
       const wInfo = watchedMap[ep.id];
-      btn.className = "modal-option-btn" + (isLastWatched ? " active" : "");
+      const isDone = Boolean(wInfo && (wInfo.completed || (wInfo.progress_pct && wInfo.progress_pct >= 90)));
+      btn.className =
+        "modal-option-btn" +
+        (isLastWatched ? " active" : "") +
+        (!isLastWatched && (isDone || (wInfo && wInfo.position > 10)) ? " watched" : "");
       let statusBadge = "▶";
-      if (wInfo && wInfo.position > 0) {
+      if (isLastWatched && wInfo && wInfo.position > 0 && !isDone) {
+        statusBadge = "▶ Остановились • " + formatTime(wInfo.position);
+      } else if (isDone) {
+        statusBadge = "✓ Просмотрено";
+      } else if (wInfo && wInfo.position > 0) {
         statusBadge = "⏱ " + formatTime(wInfo.position);
       } else if (isLastWatched) {
-        statusBadge = "✓ Текущая";
+        statusBadge = "▶ Остановились";
       }
       btn.innerHTML = `<span>${ep.title || ep.id}</span><span>${statusBadge}</span>`;
       btn.onclick = () => {
