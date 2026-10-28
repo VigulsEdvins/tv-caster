@@ -40,6 +40,9 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn('data-action="open-quality"', html)
         self.assertIn('data-action="open-speed"', html)
         self.assertIn('data-action="toggle-dock"', html)
+        self.assertIn('id="hero-banner"', html)
+        self.assertIn('id="tv-history-carousel"', html)
+        self.assertIn('data-action="open-history"', html)
 
     def test_tv_css_served(self):
         status, css, ctype = self._get("/static/tv/tv_player.css")
@@ -49,6 +52,8 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn(".focused", css)
         self.assertIn(".dock-top", css)
         self.assertIn(".dock-bottom", css)
+        self.assertIn(".tv-history-card", css)
+        self.assertIn(".hero-banner", css)
 
     def test_tv_js_served_and_valid_syntax(self):
         status, js, ctype = self._get("/static/tv/tv_player.js")

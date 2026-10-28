@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>TV Caster — Android TV Player</title>
-  <link rel="stylesheet" href="/static/tv/tv_player.css?v=2">
+  <link rel="stylesheet" href="/static/tv/tv_player.css?v=3">
 </head>
 <body class="browser-mode">
   <!-- Video Surface -->
@@ -12,19 +12,45 @@
     <video id="tv-video" playsinline autoplay></video>
   </div>
 
-  <!-- Standby / Buffering Screen -->
+  <!-- Standby / Buffering / Netflix Home Screen -->
   <div id="standby-screen" class="standby-screen">
-    <div class="standby-logo">
-      <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-        <polygon points="10 7 15 10 10 13 10 7" fill="#38bdf8"></polygon>
-        <line x1="8" y1="21" x2="16" y2="21"></line>
-        <line x1="12" y1="17" x2="12" y2="21"></line>
-      </svg>
-    </div>
-    <h1 id="standby-title" class="standby-title">TV Caster Ready</h1>
-    <p id="standby-subtitle" class="standby-subtitle">Выберите фильм или сериал на телефоне или компьютере и нажмите «Включить на ТВ».</p>
+    <div id="hero-backdrop" class="hero-backdrop"></div>
 
+    <!-- Top Brand Header -->
+    <div class="home-topbar">
+      <div class="home-brand">
+        <div class="standby-logo">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <polygon points="10 7 15 10 10 13 10 7" fill="#38bdf8"></polygon>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+          </svg>
+        </div>
+        <div>
+          <h1 id="standby-title" class="standby-title">TV Caster</h1>
+          <p id="standby-subtitle" class="standby-subtitle">Выберите сериал или фильм пультом на ТВ или отправьте с телефона</p>
+        </div>
+      </div>
+      <div id="home-close-hint" class="home-close-hint" style="display: none;">Нажмите НАЗАД для возврата к видео</div>
+    </div>
+
+    <!-- Netflix Hero Spotlight -->
+    <div id="hero-banner" class="hero-banner">
+      <div class="hero-info">
+        <div id="hero-badge" class="hero-badge">ПРОДОЛЖИТЬ ПРОСМОТР</div>
+        <h2 id="hero-title" class="hero-title">Выберите сериал ниже</h2>
+        <p id="hero-meta" class="hero-meta">Используйте стрелки ◀ ▶ на пульте для навигации по истории и нажмите OK</p>
+        <div class="hero-progress-wrap" id="hero-progress-wrap" style="display: none;">
+          <div class="hero-progress-bar">
+            <div id="hero-progress-fill" class="hero-progress-fill"></div>
+          </div>
+          <span id="hero-progress-label" class="hero-progress-label">00:00 / 00:00</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading Progress Box (shown when extracting/buffering) -->
     <div id="loading-box" class="loading-box">
       <div class="loading-status-row">
         <span id="loading-status-text">Подготовка видео…</span>
@@ -33,6 +59,15 @@
       <div class="loading-bar-track">
         <div id="loading-bar-fill" class="loading-bar-fill"></div>
       </div>
+    </div>
+
+    <!-- Horizontal History & Series Carousel -->
+    <div id="tv-history-section" class="tv-history-section">
+      <div class="tv-history-header">
+        <span class="tv-history-heading">🎬 Недавно смотрели — Сериалы и Фильмы</span>
+        <span class="tv-history-hint">◀ ▶ Выбор • OK Продолжить или выбрать серию</span>
+      </div>
+      <div id="tv-history-carousel" class="tv-history-carousel"></div>
     </div>
   </div>
 
@@ -93,6 +128,10 @@
       </div>
 
       <div class="controls-group">
+        <button class="tv-btn focusable" data-row="2" data-action="open-history" id="btn-history">
+          <span>📚 История</span>
+          <span class="btn-sub">Сериалы</span>
+        </button>
         <button class="tv-btn focusable" data-row="2" data-action="open-episodes" id="btn-episodes">
           <span>🎬 Серии</span>
           <span id="sub-episode" class="btn-sub">Выбрать</span>
@@ -125,6 +164,6 @@
     </div>
   </div>
 
-  <script src="/static/tv/tv_player.js?v=2"></script>
+  <script src="/static/tv/tv_player.js?v=3"></script>
 </body>
 </html>
