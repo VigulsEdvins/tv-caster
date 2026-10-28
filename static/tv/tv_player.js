@@ -106,6 +106,7 @@
   let historyIndex = 0;
   let lastHistorySignature = "";
   let homeBrowserOpen = true;
+  let wasPlayingBeforeHistory = false;
   let historyInspectCache = {};
   let activeHistorySeasonIdx = 0;
 
@@ -927,6 +928,13 @@
 
   function openHistoryBrowser() {
     homeBrowserOpen = true;
+    if (currentSessionId && !isPaused) {
+      wasPlayingBeforeHistory = true;
+      playerPause();
+      postAction({ action: "pause" });
+    } else {
+      wasPlayingBeforeHistory = false;
+    }
     standbyScreen.classList.remove("hidden");
     if (homeCloseHint) {
       homeCloseHint.style.display = currentSessionId ? "block" : "none";
@@ -957,6 +965,11 @@
     if (homeCloseHint) homeCloseHint.style.display = "none";
     showOverlay();
     setFocus(document.getElementById("btn-history") || document.getElementById("btn-play"));
+    if (wasPlayingBeforeHistory) {
+      wasPlayingBeforeHistory = false;
+      playerPlay();
+      postAction({ action: "play" });
+    }
   }
 
   function castFromTv(item, episodeId, startAtSec) {
