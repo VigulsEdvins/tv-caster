@@ -370,7 +370,8 @@ def fetch_thumb(url):
         with urllib.request.urlopen(req, timeout=6) as r:
             page = r.read(400000).decode("utf-8", errors="ignore")
         m = (re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', page)
-             or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', page))
+             or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', page)
+             or re.search(r'<img[^>]+src=["\'](/uploads/posts/[^"\']+)["\']', page))
         if m:
             img = urllib.parse.urljoin(url, html.unescape(m.group(1)))
             if img.startswith("http"):
@@ -829,7 +830,12 @@ def search_titles(query):
     return out[:8]
 
 def is_nextembed(url):
-    return "nextembed" in url
+    u = url or ""
+    return "nextembed" in u or "kinogoo." in u
+
+def _ep_num(val):
+    m = re.search(r"\d+", str(val or "0"))
+    return int(m.group(0)) if m else 0
 
 def is_blocked_site(url):
     """Sites behind a Cloudflare bot check: the server cannot read their pages, only the embedded player."""
@@ -839,6 +845,10 @@ def nextembed_data(url):
     """(title, seasons, movie) for an embed URL: seasons for a series, movie={'hls','names'} for a film."""
     try:
         page = fetch_page(url)
+        if "nextembed" not in url:
+            em_iframe = re.search(r'(?:data-src|src)=["\'](https?://[^"\']*nextembed\.[^"\']+)["\']', page)
+            if em_iframe:
+                page = fetch_page(html.unescape(em_iframe.group(1)))
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise Exception("not in player: this title is not available")
@@ -849,9 +859,9 @@ def nextembed_data(url):
     if i >= 0:
         seasons, _ = json.JSONDecoder().raw_decode(page[i + len("seasons:"):])
         seasons = [sn for sn in seasons if not sn.get("blocked")]
-        seasons.sort(key=lambda sn: int(sn["season"]))
+        seasons.sort(key=lambda sn: _ep_num(sn["season"]))
         for sn in seasons:
-            sn["episodes"].sort(key=lambda e: int(e["episode"]))
+            sn["episodes"].sort(key=lambda e: _ep_num(e["episode"]))
         return title, seasons, None
     hm = re.search(r'hls:\s*"([^"]+master\.m3u8[^"]*)"', page)
     if not hm:
@@ -873,11 +883,12 @@ def nextembed_structure(url):
                 "translations": [{"id": str(i), "title": nm} for i, nm in enumerate(movie["names"])]}
     out = []
     for sn in seasons:
-        n = int(sn["season"])
+        n = _ep_num(sn["season"])
         eps = []
         for e in sn["episodes"]:
             names = (e.get("audio") or {}).get("names") or []
-            eps.append({"id": "s%02de%02d" % (n, int(e["episode"])), "title": f"Серия {int(e['episode'])}",
+            ep_n = _ep_num(e["episode"])
+            eps.append({"id": "s%02de%02d" % (n, ep_n), "title": f"Серия {e['episode']}",
                         "translations": [{"id": str(i), "title": nm} for i, nm in enumerate(names)]})
         out.append({"id": "s%02d" % n, "title": f"Сезон {n}", "episodes": eps})
     return {"title": title, "kind": "series", "seasons": out, "translations": []}
@@ -892,16 +903,18 @@ def nextembed_resolve(url, episode, voice_id=None, voice_title=None):
         ep = None
         for sn in seasons:
             for e in sn["episodes"]:
-                if em and int(sn["season"]) == int(em.group(1)) and int(e["episode"]) == int(em.group(2)):
+                if em and _ep_num(sn["season"]) == int(em.group(1)) and _ep_num(e["episode"]) == int(em.group(2)):
                     ep = (sn, e)
         if not ep:
-            sn = seasons[0]
+            sm = re.search(r'(?:season=(\d+)|-(\d+)-sezon)', url or "", re.I)
+            want_sn = int(sm.group(1) or sm.group(2)) if sm else None
+            sn = next((s for s in seasons if _ep_num(s["season"]) == want_sn), seasons[0]) if want_sn else seasons[0]
             ep = (sn, sn["episodes"][0])
         sn, e = ep
         names = (e.get("audio") or {}).get("names") or []
         hls = e["hls"]
-        label = f"{title} - Сезон {int(sn['season'])}, Серия {int(e['episode'])}"
-        ep_id = "s%02de%02d" % (int(sn["season"]), int(e["episode"]))
+        label = f"{title} - Сезон {_ep_num(sn['season'])}, Серия {e['episode']}"
+        ep_id = "s%02de%02d" % (_ep_num(sn["season"]), _ep_num(e["episode"]))
     track = 0
     if voice_id and str(voice_id).isdigit() and int(voice_id) < len(names):
         track = int(voice_id)
@@ -2942,7 +2955,10 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             if speed and speed != "1.0x":
                 title += f" ({speed})"
             remember(title)
-            threading.Thread(target=download_nextembed, args=(session_id, title, master_url, track, quality, speed), daemon=True).start()
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True) and track == 0:
+                start_direct_stream(session_id, title, master_url, headers={"Referer": "https://api.nextembed.ws/"}, kind="hls", speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_nextembed, args=(session_id, title, master_url, track, quality, speed), daemon=True).start()
         elif "kinogo" in url or "cinemar.cc" in url:
             data = extract_kinogo(url, translation_id=translation_id, quality=quality, mode="stream",
                                   episode=episode, translation_title=translation_title)

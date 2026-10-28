@@ -89,6 +89,8 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertTrue(server.is_mover("https://mover.uz/watch/WMvD0sOO"))
         self.assertTrue(server.is_mover("https://mover.uz/video/embed/WMvD0sOO"))
         self.assertFalse(server.is_mover("https://rezka.ag/films/123.html"))
+        self.assertTrue(server.is_nextembed("https://kinogoo.zone/11180-papiny-dochki-novye-6-sezon.html"))
+        self.assertEqual(server._ep_num("1-2"), 1)
 
     def test_direct_stream_set_speed_and_seek_do_not_respawn_cast(self):
         sid, _ = server.new_session()
