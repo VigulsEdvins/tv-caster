@@ -450,8 +450,9 @@ body.native-bridge #tv-video {
   bottom: auto;
 }
 
-.tv-overlay.hidden {
-  display: none;
+.tv-overlay.hidden,
+.standby-screen:not(.hidden) ~ .tv-overlay {
+  display: none !important;
 }
 
 /* Header row inside overlay: Title + badges */

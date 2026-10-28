@@ -86,7 +86,7 @@
 
   // UI Navigation State
   let dockPosition = localStorage.getItem("tv_dock_position") || "bottom";
-  let overlayVisible = true;
+  let overlayVisible = false;
   let hideOverlayTimer = null;
   let toastTimer = null;
   let focusedEl = document.getElementById("btn-play");
@@ -150,13 +150,17 @@
   }
 
   function showOverlay() {
+    if (!standbyScreen.classList.contains("hidden") || homeBrowserOpen) {
+      overlayVisible = false;
+      overlayEl.classList.add("hidden");
+      return;
+    }
     overlayVisible = true;
     overlayEl.classList.remove("hidden");
     resetOverlayTimer();
   }
 
   function hideOverlay() {
-    if (modalOpen || isPaused || !currentSessionId) return;
     overlayVisible = false;
     overlayEl.classList.add("hidden");
   }
@@ -493,6 +497,7 @@
     if (!currentSessionId && (data.status === "preparing" || (data.status === "downloading" && !data.stream_url))) {
       standbyScreen.classList.remove("hidden");
       homeBrowserOpen = true;
+      hideOverlay();
       standbyTitle.textContent = data.title || "Подготовка видео…";
       standbySubtitle.textContent = data.status_text || "Пожалуйста, подождите…";
       loadingBox.classList.add("active");
@@ -502,6 +507,7 @@
     } else if (data.status === "error") {
       standbyScreen.classList.remove("hidden");
       homeBrowserOpen = true;
+      hideOverlay();
       standbyTitle.textContent = data.error || "Ошибка воспроизведения";
       standbySubtitle.textContent = data.error_hint || "Попробуйте выбрать другое качество или озвучку.";
       loadingBox.classList.remove("active");
@@ -538,6 +544,7 @@
         }
         standbyScreen.classList.remove("hidden");
         homeBrowserOpen = true;
+        hideOverlay();
         if (homeCloseHint) homeCloseHint.style.display = "none";
         loadingBox.classList.remove("active");
         standbyTitle.textContent = "TV Caster";
@@ -935,6 +942,7 @@
     closeModal();
     standbyScreen.classList.remove("hidden");
     homeBrowserOpen = true;
+    hideOverlay();
     loadingBox.classList.add("active");
     const epLabel = episodeId ? " (" + String(episodeId).toUpperCase() + ")" : "";
     loadingStatusText.textContent = `Запуск: ${item.series_title || item.title}${epLabel}…`;

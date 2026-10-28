@@ -43,6 +43,7 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn('id="hero-banner"', html)
         self.assertIn('id="tv-history-carousel"', html)
         self.assertIn('data-action="open-history"', html)
+        self.assertIn('id="tv-overlay" class="tv-overlay dock-bottom hidden"', html)
 
     def test_tv_css_served(self):
         status, css, ctype = self._get("/static/tv/tv_player.css")
@@ -54,6 +55,7 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn(".dock-bottom", css)
         self.assertIn(".tv-history-card", css)
         self.assertIn(".hero-banner", css)
+        self.assertIn(".standby-screen:not(.hidden) ~ .tv-overlay", css)
 
     def test_tv_js_served_and_valid_syntax(self):
         status, js, ctype = self._get("/static/tv/tv_player.js")
