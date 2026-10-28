@@ -47,6 +47,20 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn('data-action="open-history"', html)
         self.assertIn('id="tv-overlay" class="tv-overlay dock-bottom hidden"', html)
 
+    def test_index_html_structure(self):
+        status, html, ctype = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", ctype)
+        self.assertIn("TV Caster Hub", html)
+        self.assertIn('id="tabBtnCast"', html)
+        self.assertIn('id="tabBtnFavs"', html)
+        self.assertIn('id="tabBtnHistory"', html)
+        self.assertIn('id="playerFavBtn"', html)
+        self.assertIn('id="favoritesList"', html)
+        self.assertIn('id="historyList"', html)
+        self.assertIn('id="liveSpeedsChips"', html)
+        self.assertIn('id="urlInput"', html)
+
     def test_tv_css_served(self):
         status, css, ctype = self._get("/static/tv/tv_player.css")
         self.assertEqual(status, 200)

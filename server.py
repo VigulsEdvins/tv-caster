@@ -3834,12 +3834,29 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         if status == "downloading" and progress >= 3 and app_state["started_at"]:
             elapsed = time.time() - app_state["started_at"]
             eta = int(elapsed * (100 - progress) / progress)
+        cur_u = normalize_url(app_state.get("url") or "")
+        opts = app_state.get("opts") or {}
+        cached_info = _inspect_cache.get(cur_u) or {}
+        cur_thumb = app_state.get("thumb") or cached_info.get("thumb") or ""
+        if not cur_thumb and cur_u:
+            for h in load_history():
+                if h.get("url") == cur_u and h.get("thumb"):
+                    cur_thumb = h.get("thumb")
+                    break
         status_payload = {
             "app_status": status,
             "stage": app_state["stage"],
             "status_text": app_state["status_text"],
             "title": app_state["title"],
             "url": app_state["url"],
+            "thumb": cur_thumb,
+            "is_favorite": is_favorite(cur_u) if cur_u else False,
+            "playback_speed": opts.get("speed", "1.0x"),
+            "quality": opts.get("quality", "720p"),
+            "qualities": cached_info.get("qualities", ["1080p", "720p", "480p", "360p"]),
+            "speeds": cached_info.get("speeds", ["0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]),
+            "translation_title": opts.get("translation_title") or "",
+            "is_series": bool(app_state.get("episode") or (re.search(r"(\d+\s*сезон|\d+\s*серия|s\d+e\d+)", app_state.get("title") or "", re.I))),
             "progress": progress,
             "buffered": progress if info.get("active") and status in ("downloading", "playing") else 100,
             "eta": eta,
