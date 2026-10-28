@@ -275,11 +275,86 @@ def add_history(title, url, episode=None, **extra):
 def update_history(url, episode=None, **fields):
     with history_lock:
         hist = load_history()
+        updated = False
         for h in hist:
-            if _same(h, url, episode):
+            if episode is None and "thumb" in fields and h.get("url") == url:
+                h.update(fields)
+                updated = True
+            elif _same(h, url, episode):
                 h.update(fields)
                 _save_history(hist)
                 return
+        if updated:
+            _save_history(hist)
+
+def clean_show_title(raw_title: str) -> str:
+    """Strip episode/season/quality/voiceover suffixes to get a clean series/movie title."""
+    t = (raw_title or "").strip()
+    t = re.sub(r"\[.*?\]", "", t)
+    t = re.sub(r"\(.*?\)", "", t)
+    t = re.sub(r"\s*[–—-]*\s*\d+\s*сезон.*", "", t, flags=re.I)
+    t = re.sub(r"\s*[–—-]*\s*\d+\s*серия.*", "", t, flags=re.I)
+    t = re.sub(r"\s*[–—-]*\s*s\d+e\d+.*", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -–—:·")
+    return t or raw_title or "Без названия"
+
+def build_tv_history_payload(raw_history=None) -> list:
+    """Group watched history by URL so each series/movie appears once with its latest state and watched_episodes map."""
+    hist = raw_history if raw_history is not None else load_history()
+    by_url = {}
+    ordered_urls = []
+    for h in hist:
+        u = h.get("url")
+        if not u:
+            continue
+        if u not in by_url:
+            ordered_urls.append(u)
+            by_url[u] = {
+                "primary": dict(h),
+                "watched_episodes": {},
+                "thumb": h.get("thumb", ""),
+            }
+        group = by_url[u]
+        if not group["thumb"] and h.get("thumb"):
+            group["thumb"] = h.get("thumb")
+        ep = h.get("episode")
+        if ep and ep not in group["watched_episodes"]:
+            group["watched_episodes"][ep] = {
+                "position": float(h.get("position") or 0),
+                "duration": float(h.get("duration") or 0),
+                "timestamp": int(h.get("timestamp") or 0),
+            }
+    items = []
+    for u in ordered_urls:
+        group = by_url[u]
+        p = group["primary"]
+        pos = float(p.get("position") or 0)
+        dur = float(p.get("duration") or 0)
+        pct = min(100, max(0, int(round(pos * 100.0 / dur)))) if dur > 0 else 0
+        raw_title = p.get("title") or u
+        is_series = bool(
+            p.get("episode")
+            or group["watched_episodes"]
+            or re.search(r"(\d+\s*сезон|\d+\s*серия|s\d+e\d+)", raw_title, re.I)
+        )
+        items.append({
+            "title": raw_title,
+            "series_title": clean_show_title(raw_title),
+            "url": u,
+            "episode": p.get("episode"),
+            "position": pos,
+            "duration": dur,
+            "progress_pct": pct,
+            "thumb": group["thumb"] or "",
+            "quality": p.get("quality") or "720p",
+            "speed": p.get("speed") or "1.0x",
+            "translation_id": p.get("translation_id"),
+            "translation_title": p.get("translation_title"),
+            "timestamp": int(p.get("timestamp") or 0),
+            "is_series": is_series,
+            "watched_episodes": group["watched_episodes"],
+        })
+    return items
 
 def delete_history(url=None, episode=None):
     with history_lock:
@@ -3192,6 +3267,7 @@ def build_tv_state_payload():
         "last_command": tv_player_state.get("last_command", {"seq": 0, "type": "none", "target": None}),
         "error": app_state.get("last_error", ""),
         "error_hint": app_state.get("error_hint", ""),
+        "history": build_tv_history_payload(),
     }
 
 class TVCasterHandler(http.server.BaseHTTPRequestHandler):
@@ -3236,6 +3312,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.serve_status()
         elif clean == "/api/history":
             self.serve_history()
+        elif clean == "/api/tv/history":
+            self.send_json({"ok": True, "items": build_tv_history_payload()})
         elif clean == "/api/tvs":
             devices = refresh_tv()
             self.send_json({"current": TV["ip"], "devices": [{"ip": d["ip"], "name": d["name"]} for d in devices]})
@@ -3466,6 +3544,32 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             elif action == "set_player_mode":
                 tv_player_state["use_custom_player"] = bool(data.get("use_custom_player", True))
                 self.send_json({"ok": True, "use_custom_player": tv_player_state["use_custom_player"]})
+            elif action == "cast_from_tv":
+                target_url = data.get("url") or url
+                if not target_url:
+                    self.send_json({"ok": False, "error": "URL required"})
+                    return
+                ep = data.get("episode") or None
+                start_at = int(float(data.get("start_at") or 0))
+                qual = data.get("quality") or opts.get("quality", "720p")
+                spd = data.get("speed") or opts.get("speed", "1.0x")
+                tr_id = data.get("translation_id") if "translation_id" in data else opts.get("translation_id")
+                tr_title = data.get("translation_title") if "translation_title" in data else opts.get("translation_title")
+                threading.Thread(
+                    target=handle_cast_request,
+                    kwargs=dict(
+                        url=target_url,
+                        translation_id=tr_id,
+                        quality=qual,
+                        speed=spd,
+                        start_at=start_at,
+                        audio_idx=int(data.get("audio_index") or 0),
+                        episode=ep,
+                        translation_title=tr_title,
+                    ),
+                    daemon=True,
+                ).start()
+                self.send_json({"ok": True})
             else:
                 self.send_json({"ok": False, "error": f"Unknown action: {action}"})
 
