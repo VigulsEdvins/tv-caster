@@ -837,8 +837,11 @@
         const img = document.createElement("img");
         img.className = "tv-history-card-thumb";
         img.src = item.thumb;
-        img.alt = item.series_title || item.title || "";
+        img.alt = "";
         img.loading = "lazy";
+        img.onerror = () => {
+          img.style.display = "none";
+        };
         card.appendChild(img);
       }
 
