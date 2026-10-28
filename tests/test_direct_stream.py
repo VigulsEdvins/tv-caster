@@ -85,6 +85,11 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertEqual(state.get("cdn_url"), "https://cdn.example.com/movie.mp4")
         self.assertEqual(state.get("direct_headers", {}).get("Referer"), "https://rezka.ag/")
 
+    def test_is_mover_and_inspect_mover(self):
+        self.assertTrue(server.is_mover("https://mover.uz/watch/WMvD0sOO"))
+        self.assertTrue(server.is_mover("https://mover.uz/video/embed/WMvD0sOO"))
+        self.assertFalse(server.is_mover("https://rezka.ag/films/123.html"))
+
     def test_direct_stream_set_speed_and_seek_do_not_respawn_cast(self):
         sid, _ = server.new_session()
         server.app_state["url"] = "https://rezka.ag/films/test.html"

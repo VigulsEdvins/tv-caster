@@ -1335,6 +1335,37 @@ def generate_lsm_master_playlist(lsm_data, chosen_lang=None, chosen_quality=None
 
     return "\n".join(lines) + "\n"
 
+def is_mover(url):
+    return bool(re.search(r'mover\.uz/(watch|video/embed)/', url or ""))
+
+def extract_mover(url, quality="720p"):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    with urllib.request.urlopen(req, timeout=12) as r:
+        html = r.read().decode("utf-8", errors="ignore")
+    m = re.search(r'data-config="#2([^"]+)"', html)
+    if not m:
+        m_embed = re.search(r'new Playerjs\(.#2([^"\x27]+)', html)
+        if not m_embed:
+            raise Exception("Could not find mover.uz video player config")
+        payload = m_embed.group(1)
+    else:
+        payload = m.group(1)
+    clean = re.sub(r"//.{32}", "", payload)
+    clean += "=" * ((4 - len(clean) % 4) % 4)
+    cfg = json.loads(base64.b64decode(clean).decode("utf-8"))
+    title = cfg.get("title") or "Mover.uz Video"
+    file_spec = cfg.get("file", "")
+    streams = {}
+    if "[" in file_spec:
+        for q_match, u_match in re.findall(r"\[([0-9]+p)\](https?://[^\s,]+)", file_spec):
+            streams[q_match] = u_match
+    elif file_spec.startswith("http"):
+        streams["720p"] = file_spec
+    qualities = list(streams.keys()) or ["720p"]
+    qualities.sort(key=lambda x: int(re.sub(r"\D", "", x) or 0), reverse=True)
+    chosen = streams.get(quality) or (streams.get("720p") if "720p" in streams else None) or (streams[qualities[0]] if streams else file_spec)
+    return title, chosen, qualities, cfg.get("duration", 0), cfg.get("poster")
+
 def inspect_url(url):
     url = normalize_url(url)
     if is_blocked_site(url):
@@ -1388,6 +1419,19 @@ def inspect_url(url):
             "qualities": data.get("qualities", ["1080p", "720p", "540p", "360p", "240p"]),
             "speeds": speeds,
             "selected_translation": data.get("selected_translation"),
+        }
+    elif is_mover(url):
+        title, stream_url, qualities, dur, thumb = extract_mover(url)
+        res = {
+            "ok": True,
+            "title": title,
+            "kind": "movie",
+            "seasons": [],
+            "translations": [],
+            "qualities": qualities,
+            "speeds": speeds,
+            "duration": dur,
+            "thumb": thumb,
         }
     else:
         res = {
@@ -2914,6 +2958,18 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                 args=(session_id, title, v_url, a_url, is_live, speed, quality),
                 daemon=True,
             ).start()
+        elif is_mover(url):
+            title, stream_url, qualities, dur, thumb = extract_mover(url, quality=quality)
+            phase(session_id, "mover extracted")
+            if dur > 0:
+                tv_player_state["duration"] = float(dur)
+            if speed and speed != "1.0x":
+                title += f" ({speed})"
+            remember(title)
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                start_direct_stream(session_id, title, stream_url, headers={"Referer": "https://mover.uz/", "User-Agent": "Mozilla/5.0"}, kind="mp4", speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
         else:
             is_youtube = bool(re.search(r'(youtube\.com|youtu\.be)/', url))
             q_val = quality.replace("p", "") if quality else "720"
