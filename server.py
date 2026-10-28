@@ -27,6 +27,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "media_cache")
 CURRENT_FILE = os.path.join(CACHE_DIR, "current.ts")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
+FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 # Optional venv with yt-dlp and imageio-ffmpeg; override with TV_CASTER_VENV
 VENV_DIR = os.environ.get("TV_CASTER_VENV", "/home/edvins/.gemini/antigravity/scratch/ffmpeg_venv")
 YT_DLP_BIN = shutil.which("yt-dlp") or os.path.join(VENV_DIR, "bin", "yt-dlp")
@@ -363,9 +364,99 @@ def build_tv_history_payload(raw_history=None) -> list:
             "translation_title": p.get("translation_title"),
             "timestamp": int(p.get("timestamp") or 0),
             "is_series": is_series,
+            "is_favorite": is_favorite(u),
             "watched_episodes": group["watched_episodes"],
         })
     return items
+
+favorites_lock = threading.Lock()
+
+def load_favorites() -> list:
+    if os.path.exists(FAVORITES_FILE):
+        try:
+            with open(FAVORITES_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def _save_favorites(favs):
+    try:
+        tmp = FAVORITES_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(favs, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, FAVORITES_FILE)
+    except Exception:
+        pass
+
+def is_favorite(url: str) -> bool:
+    if not url:
+        return False
+    favs = load_favorites()
+    return any(f.get("url") == url for f in favs)
+
+def toggle_favorite(url: str, title: str = None, thumb: str = None) -> bool:
+    if not url:
+        return False
+    with favorites_lock:
+        favs = load_favorites()
+        exists = next((f for f in favs if f.get("url") == url), None)
+        if exists:
+            favs = [f for f in favs if f.get("url") != url]
+            _save_favorites(favs)
+            return False
+        hist = load_history()
+        matching_h = next((h for h in hist if h.get("url") == url), None)
+        resolved_title = title or (matching_h.get("title") if matching_h else url)
+        resolved_thumb = thumb or (matching_h.get("thumb") if matching_h else "")
+        entry = {
+            "url": url,
+            "title": resolved_title,
+            "series_title": clean_show_title(resolved_title),
+            "thumb": resolved_thumb,
+            "timestamp": int(time.time()),
+        }
+        favs.insert(0, entry)
+        _save_favorites(favs)
+        if not resolved_thumb:
+            threading.Thread(target=fetch_thumb, args=(url,), daemon=True).start()
+        return True
+
+def build_tv_favorites_payload() -> list:
+    """Build list of favorites enriched with latest watched state from history."""
+    favs = load_favorites()
+    if not favs:
+        return []
+    hist_items = build_tv_history_payload()
+    hist_by_url = {h["url"]: h for h in hist_items}
+    out = []
+    for f in favs:
+        u = f.get("url")
+        if not u:
+            continue
+        h = hist_by_url.get(u)
+        raw_title = f.get("title") or (h.get("title") if h else u)
+        item = {
+            "url": u,
+            "title": raw_title,
+            "series_title": f.get("series_title") or clean_show_title(raw_title),
+            "thumb": f.get("thumb") or (h.get("thumb") if h else ""),
+            "timestamp": int(f.get("timestamp") or 0),
+            "is_favorite": True,
+            "is_series": bool(h.get("is_series")) if h else bool(re.search(r"(\d+\s*сезон|\d+\s*серия|s\d+e\d+)", raw_title, re.I)),
+            "episode": h.get("episode") if h else None,
+            "position": h.get("position", 0.0) if h else 0.0,
+            "duration": h.get("duration", 0.0) if h else 0.0,
+            "progress_pct": h.get("progress_pct", 0) if h else 0,
+            "completed": h.get("completed", False) if h else False,
+            "quality": h.get("quality", "720p") if h else "720p",
+            "speed": h.get("speed", "1.0x") if h else "1.0x",
+            "translation_id": h.get("translation_id") if h else None,
+            "translation_title": h.get("translation_title") if h else None,
+            "watched_episodes": h.get("watched_episodes", {}) if h else {},
+        }
+        out.append(item)
+    return out
 
 def delete_history(url=None, episode=None):
     with history_lock:
@@ -3314,6 +3405,8 @@ def build_tv_state_payload():
         "error": app_state.get("last_error", ""),
         "error_hint": app_state.get("error_hint", ""),
         "history": hist_payload,
+        "favorites": build_tv_favorites_payload(),
+        "is_favorite": is_favorite(url),
         "watched_episodes": cur_watched_eps,
     }
 
@@ -3361,6 +3454,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.serve_history()
         elif clean == "/api/tv/history":
             self.send_json({"ok": True, "items": build_tv_history_payload()})
+        elif clean == "/api/favorites":
+            self.send_json({"ok": True, "items": build_tv_favorites_payload()})
         elif clean == "/api/tvs":
             devices = refresh_tv()
             self.send_json({"current": TV["ip"], "devices": [{"ip": d["ip"], "name": d["name"]} for d in devices]})
@@ -3630,8 +3725,27 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                     daemon=True,
                 ).start()
                 self.send_json({"ok": True})
+            elif action == "toggle_favorite":
+                target_url = data.get("url") or url
+                if not target_url:
+                    self.send_json({"ok": False, "error": "URL required"})
+                    return
+                is_fav = toggle_favorite(
+                    target_url,
+                    title=data.get("title") or app_state.get("title"),
+                    thumb=data.get("thumb")
+                )
+                self.send_json({"ok": True, "is_favorite": is_fav})
             else:
                 self.send_json({"ok": False, "error": f"Unknown action: {action}"})
+
+        elif clean == "/api/favorites/toggle":
+            target_url = data.get("url")
+            if not target_url:
+                self.send_json({"ok": False, "error": "URL required"})
+                return
+            is_fav = toggle_favorite(target_url, title=data.get("title"), thumb=data.get("thumb"))
+            self.send_json({"ok": True, "is_favorite": is_fav, "items": build_tv_favorites_payload()})
 
         elif clean == "/api/cast":
             url = data.get("url", "")

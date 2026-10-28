@@ -61,6 +61,15 @@
       </div>
     </div>
 
+    <!-- Favorites Shelf ("Мой список") -->
+    <div id="tv-favorites-section" class="tv-history-section" style="display: none;">
+      <div class="tv-history-header">
+        <span class="tv-history-heading">❤️ Мой список — Избранное</span>
+        <span class="tv-history-hint">◀ ▶ Выбор • OK Открыть • ▼ К истории</span>
+      </div>
+      <div id="tv-favorites-carousel" class="tv-history-carousel"></div>
+    </div>
+
     <!-- Horizontal History & Series Carousel -->
     <div id="tv-history-section" class="tv-history-section">
       <div class="tv-history-header">
@@ -128,6 +137,10 @@
       </div>
 
       <div class="controls-group">
+        <button class="tv-btn focusable" data-row="2" data-action="toggle-fav" id="btn-fav">
+          <span id="fav-icon">🤍</span>
+          <span id="fav-label">В список</span>
+        </button>
         <button class="tv-btn focusable" data-row="2" data-action="open-history" id="btn-history">
           <span>📚 История</span>
           <span class="btn-sub">Сериалы</span>
@@ -164,6 +177,6 @@
     </div>
   </div>
 
-  <script src="/static/tv/tv_player.js?v=7"></script>
+  <script src="/static/tv/tv_player.js?v=8"></script>
 </body>
 </html>

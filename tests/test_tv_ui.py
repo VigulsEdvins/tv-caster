@@ -41,7 +41,9 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn('data-action="open-speed"', html)
         self.assertIn('data-action="toggle-dock"', html)
         self.assertIn('id="hero-banner"', html)
+        self.assertIn('id="tv-favorites-section"', html)
         self.assertIn('id="tv-history-carousel"', html)
+        self.assertIn('data-action="toggle-fav"', html)
         self.assertIn('data-action="open-history"', html)
         self.assertIn('id="tv-overlay" class="tv-overlay dock-bottom hidden"', html)
 

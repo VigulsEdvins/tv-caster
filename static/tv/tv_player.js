@@ -55,6 +55,11 @@
   const heroProgressLabel = document.getElementById("hero-progress-label");
   const homeCloseHint = document.getElementById("home-close-hint");
   const historyCarousel = document.getElementById("tv-history-carousel");
+  const favoritesSection = document.getElementById("tv-favorites-section");
+  const favoritesCarousel = document.getElementById("tv-favorites-carousel");
+  const btnFav = document.getElementById("btn-fav");
+  const favIcon = document.getElementById("fav-icon");
+  const favLabel = document.getElementById("fav-label");
 
   // Player State
   let serverState = {
@@ -105,6 +110,11 @@
   let historyCardEls = [];
   let historyIndex = 0;
   let lastHistorySignature = "";
+  let favoriteItems = [];
+  let favoriteCardEls = [];
+  let favoritesIndex = 0;
+  let lastFavoritesSignature = "";
+  let activeShelf = "history"; // "favorites" or "history"
   let homeBrowserOpen = true;
   let wasPlayingBeforeHistory = false;
   let historyInspectCache = {};
@@ -489,10 +499,14 @@
       overlayBufferInfo.textContent = data.status_text || "";
     }
 
-    // Update Netflix History Carousel if history payload is present
+    // Update Netflix History & Favorites Carousels
+    if (Array.isArray(data.favorites)) {
+      renderFavoritesCarousel(data.favorites);
+    }
     if (Array.isArray(data.history)) {
       renderHistoryCarousel(data.history);
     }
+    updateFavButtonUI(Boolean(data.is_favorite));
 
     // Standby / Loading states (only show when no stream is currently playing on screen)
     if (!currentSessionId && (data.status === "preparing" || (data.status === "downloading" && !data.stream_url))) {
@@ -812,8 +826,30 @@
     }
   }
 
+  function updateFavButtonUI(isFav) {
+    if (favIcon && favLabel) {
+      favIcon.textContent = isFav ? "❤️" : "🤍";
+      favLabel.textContent = isFav ? "В списке" : "В список";
+    }
+  }
+
+  function focusFavoriteCard(idx) {
+    if (!favoriteCardEls.length) return;
+    activeShelf = "favorites";
+    favoritesIndex = Math.max(0, Math.min(favoriteCardEls.length - 1, idx));
+    const card = favoriteCardEls[favoritesIndex];
+    setFocus(card);
+    try {
+      card.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    } catch (_) {}
+    if (favoriteItems[favoritesIndex]) {
+      updateHeroSpotlight(favoriteItems[favoritesIndex]);
+    }
+  }
+
   function focusHistoryCard(idx) {
     if (!historyCardEls.length) return;
+    activeShelf = "history";
     historyIndex = Math.max(0, Math.min(historyCardEls.length - 1, idx));
     const card = historyCardEls[historyIndex];
     setFocus(card);
@@ -822,6 +858,103 @@
     } catch (_) {}
     if (historyItems[historyIndex]) {
       updateHeroSpotlight(historyItems[historyIndex]);
+    }
+  }
+
+  function renderFavoritesCarousel(items) {
+    if (!favoritesCarousel || !favoritesSection) return;
+    favoriteItems = Array.isArray(items) ? items : [];
+    if (!favoriteItems.length) {
+      favoritesSection.style.display = "none";
+      favoriteCardEls = [];
+      if (activeShelf === "favorites") {
+        activeShelf = "history";
+      }
+      return;
+    }
+    favoritesSection.style.display = "flex";
+    const sig = favoriteItems
+      .map((it) => `${it.url}|${it.episode || ""}|${Math.floor(it.position || 0)}|${it.thumb || ""}`)
+      .join(";;");
+    if (sig === lastFavoritesSignature && favoriteCardEls.length === favoriteItems.length) {
+      return;
+    }
+    lastFavoritesSignature = sig;
+    favoritesCarousel.innerHTML = "";
+    favoriteCardEls = [];
+
+    favoriteItems.forEach((item, idx) => {
+      const card = document.createElement("button");
+      card.className = "tv-history-card focusable";
+      card.type = "button";
+
+      if (item.thumb) {
+        const img = document.createElement("img");
+        img.className = "tv-history-card-thumb";
+        img.src = item.thumb;
+        img.alt = "";
+        img.loading = "lazy";
+        img.onerror = () => { img.style.display = "none"; };
+        card.appendChild(img);
+      }
+
+      const grad = document.createElement("div");
+      grad.className = "tv-history-card-gradient";
+      card.appendChild(grad);
+
+      const badge = document.createElement("div");
+      badge.className = "tv-history-card-badge fav-badge";
+      badge.textContent = item.episode ? "❤️ " + String(item.episode).toUpperCase() : "❤️ В СПИСКЕ";
+      card.appendChild(badge);
+
+      const body = document.createElement("div");
+      body.className = "tv-history-card-body";
+
+      const titleEl = document.createElement("div");
+      titleEl.className = "tv-history-card-title";
+      titleEl.textContent = item.series_title || item.title || "Без названия";
+      body.appendChild(titleEl);
+
+      const subEl = document.createElement("div");
+      subEl.className = "tv-history-card-sub";
+      const subParts = [];
+      if (item.episode) subParts.push(String(item.episode).toUpperCase());
+      if (item.position > 0) subParts.push("с " + formatTime(item.position));
+      if (item.translation_title) subParts.push(item.translation_title);
+      subEl.textContent = subParts.join(" • ") || "В избранном";
+      body.appendChild(subEl);
+
+      card.appendChild(body);
+
+      if (item.progress_pct > 0) {
+        const progTrack = document.createElement("div");
+        progTrack.className = "tv-history-card-progress";
+        const progFill = document.createElement("div");
+        progFill.className = "tv-history-card-progress-fill";
+        progFill.style.width = Math.min(100, Math.max(5, item.progress_pct)) + "%";
+        progTrack.appendChild(progFill);
+        card.appendChild(progTrack);
+      }
+
+      card.addEventListener("focus", () => {
+        favoritesIndex = idx;
+        activeShelf = "favorites";
+        updateHeroSpotlight(item);
+      });
+
+      card.addEventListener("click", () => {
+        favoritesIndex = idx;
+        activeShelf = "favorites";
+        updateHeroSpotlight(item);
+        openHistoryItemModal(item, card);
+      });
+
+      favoritesCarousel.appendChild(card);
+      favoriteCardEls.push(card);
+    });
+
+    if (favoritesIndex >= favoriteCardEls.length) {
+      favoritesIndex = 0;
     }
   }
 
@@ -941,18 +1074,30 @@
     }
     overlayEl.classList.add("hidden");
     overlayVisible = false;
+    fetch("/api/favorites")
+      .then((r) => r.json())
+      .then((res) => {
+        if (res && Array.isArray(res.items)) {
+          renderFavoritesCarousel(res.items);
+        }
+      })
+      .catch(() => {});
     fetch("/api/tv/history")
       .then((r) => r.json())
       .then((res) => {
         if (res && Array.isArray(res.items)) {
           renderHistoryCarousel(res.items);
         }
-        if (historyCardEls.length) {
+        if (favoriteCardEls.length > 0) {
+          focusFavoriteCard(favoritesIndex);
+        } else if (historyCardEls.length > 0) {
           focusHistoryCard(historyIndex);
         }
       })
       .catch(() => {
-        if (historyCardEls.length) {
+        if (favoriteCardEls.length > 0) {
+          focusFavoriteCard(favoritesIndex);
+        } else if (historyCardEls.length > 0) {
           focusHistoryCard(historyIndex);
         }
       });
@@ -1043,6 +1188,17 @@
       };
       modalOptionsGrid.appendChild(restartBtn);
     }
+
+    // Option 4: Favorite toggle (Add to / Remove from My List)
+    const favBtn = document.createElement("button");
+    favBtn.className = "modal-option-btn";
+    const isFav = Boolean(item.is_favorite);
+    favBtn.innerHTML = `<span>${isFav ? "💔 Удалить из Моего списка" : "❤️ Добавить в Мой список"}</span><span>${isFav ? "Удалить" : "Сохранить"}</span>`;
+    favBtn.onclick = () => {
+      closeModal();
+      toggleFavoriteAction(item.url, item.series_title || item.title, item.thumb);
+    };
+    modalOptionsGrid.appendChild(favBtn);
 
     cachedModalTabs = [];
     cachedModalBtns = Array.from(modalOptionsGrid.querySelectorAll(".modal-option-btn"));
@@ -1189,6 +1345,38 @@
       });
   }
 
+  function toggleFavoriteAction(targetUrl, title, thumb) {
+    if (!targetUrl) return;
+    postAction({
+      action: "toggle_favorite",
+      url: targetUrl,
+      title: title || "",
+      thumb: thumb || "",
+    }).then((res) => {
+      const isFav = res && res.is_favorite;
+      showToast(isFav ? "❤️ Добавлено в Мой список" : "💔 Удалено из списка");
+      if (serverState.url === targetUrl) {
+        updateFavButtonUI(isFav);
+      }
+      fetch("/api/favorites")
+        .then((r) => r.json())
+        .then((fRes) => {
+          if (fRes && Array.isArray(fRes.items)) {
+            renderFavoritesCarousel(fRes.items);
+          }
+        })
+        .catch(() => {});
+      fetch("/api/tv/history")
+        .then((r) => r.json())
+        .then((hRes) => {
+          if (hRes && Array.isArray(hRes.items)) {
+            renderHistoryCarousel(hRes.items);
+          }
+        })
+        .catch(() => {});
+    });
+  }
+
   // Button Click Bindings
   document.querySelectorAll("#tv-overlay .focusable").forEach((el) => {
     el.addEventListener("click", () => {
@@ -1205,6 +1393,8 @@
       } else if (action === "next-ep") {
         showToast("⏭ Следующая серия…");
         postAction({ action: "next_episode" });
+      } else if (action === "toggle-fav") {
+        toggleFavoriteAction(serverState.url, serverState.title);
       } else if (action === "open-history") {
         openHistoryBrowser();
       } else if (action === "open-episodes") {
@@ -1314,7 +1504,7 @@
       return;
     }
 
-    // 1.5 Netflix Home / History Screen Navigation (when standby screen is visible)
+    // 1.5 Netflix Home / History & Favorites Screen Navigation
     if (!standbyScreen.classList.contains("hidden")) {
       if (dir === "BACK") {
         if (currentSessionId) {
@@ -1322,18 +1512,40 @@
         }
         return;
       }
-      if (historyCardEls.length) {
+
+      if (activeShelf === "favorites" && favoriteCardEls.length > 0) {
+        if (dir === "LEFT") {
+          focusFavoriteCard(favoritesIndex - 1);
+        } else if (dir === "RIGHT") {
+          focusFavoriteCard(favoritesIndex + 1);
+        } else if (dir === "DOWN") {
+          if (historyCardEls.length > 0) {
+            focusHistoryCard(historyIndex);
+          }
+        } else if (dir === "ENTER") {
+          if (favoriteCardEls[favoritesIndex]) {
+            favoriteCardEls[favoritesIndex].click();
+          }
+        }
+        return;
+      }
+
+      if (historyCardEls.length > 0) {
         if (dir === "LEFT") {
           focusHistoryCard(historyIndex - 1);
         } else if (dir === "RIGHT") {
           focusHistoryCard(historyIndex + 1);
-        } else if (dir === "UP" || dir === "DOWN") {
-          focusHistoryCard(historyIndex);
+        } else if (dir === "UP") {
+          if (favoriteCardEls.length > 0) {
+            focusFavoriteCard(favoritesIndex);
+          }
         } else if (dir === "ENTER") {
           if (historyCardEls[historyIndex]) {
             historyCardEls[historyIndex].click();
           }
         }
+      } else if (favoriteCardEls.length > 0) {
+        focusFavoriteCard(favoritesIndex);
       }
       return;
     }
