@@ -861,6 +861,11 @@
     }
   }
 
+  function isUrlFavorite(url) {
+    if (!url) return false;
+    return Boolean(favoriteItems && favoriteItems.some((f) => f && f.url === url));
+  }
+
   function renderFavoritesCarousel(items) {
     if (!favoritesCarousel || !favoritesSection) return;
     favoriteItems = Array.isArray(items) ? items : [];
@@ -962,7 +967,7 @@
     if (!historyCarousel) return;
     historyItems = Array.isArray(items) ? items : [];
     const sig = historyItems
-      .map((it) => `${it.url}|${it.episode || ""}|${Math.floor(it.position || 0)}|${it.thumb || ""}`)
+      .map((it) => `${it.url}|${it.episode || ""}|${Math.floor(it.position || 0)}|${it.thumb || ""}|${Boolean(isUrlFavorite(it.url))}`)
       .join(";;");
     if (sig === lastHistorySignature && historyCardEls.length === historyItems.length) {
       return;
@@ -1192,11 +1197,12 @@
     // Option 4: Favorite toggle (Add to / Remove from My List)
     const favBtn = document.createElement("button");
     favBtn.className = "modal-option-btn";
-    const isFav = Boolean(item.is_favorite);
+    const isFav = isUrlFavorite(item.url);
+    item.is_favorite = isFav;
     favBtn.innerHTML = `<span>${isFav ? "💔 Удалить из Моего списка" : "❤️ Добавить в Мой список"}</span><span>${isFav ? "Удалить" : "Сохранить"}</span>`;
     favBtn.onclick = () => {
       closeModal();
-      toggleFavoriteAction(item.url, item.series_title || item.title, item.thumb);
+      toggleFavoriteAction(item.url, item.series_title || item.title, item.thumb, item);
     };
     modalOptionsGrid.appendChild(favBtn);
 
@@ -1345,7 +1351,7 @@
       });
   }
 
-  function toggleFavoriteAction(targetUrl, title, thumb) {
+  function toggleFavoriteAction(targetUrl, title, thumb, itemObj) {
     if (!targetUrl) return;
     postAction({
       action: "toggle_favorite",
@@ -1353,11 +1359,35 @@
       title: title || "",
       thumb: thumb || "",
     }).then((res) => {
-      const isFav = res && res.is_favorite;
+      const isFav = Boolean(res && res.is_favorite);
       showToast(isFav ? "❤️ Добавлено в Мой список" : "💔 Удалено из списка");
+      if (itemObj) {
+        itemObj.is_favorite = isFav;
+      }
       if (serverState.url === targetUrl) {
+        serverState.is_favorite = isFav;
         updateFavButtonUI(isFav);
       }
+      if (Array.isArray(historyItems)) {
+        historyItems.forEach((h) => {
+          if (h && h.url === targetUrl) {
+            h.is_favorite = isFav;
+          }
+        });
+      }
+      if (!isFav) {
+        favoriteItems = (favoriteItems || []).filter((f) => f && f.url !== targetUrl);
+      } else if (!favoriteItems.some((f) => f && f.url === targetUrl)) {
+        const newFav = itemObj
+          ? Object.assign({}, itemObj, { is_favorite: true })
+          : { url: targetUrl, title: title, thumb: thumb, is_favorite: true };
+        favoriteItems.unshift(newFav);
+      }
+      lastHistorySignature = "";
+      lastFavoritesSignature = "";
+      renderFavoritesCarousel(favoriteItems);
+      renderHistoryCarousel(historyItems);
+
       fetch("/api/favorites")
         .then((r) => r.json())
         .then((fRes) => {
@@ -1394,7 +1424,7 @@
         showToast("⏭ Следующая серия…");
         postAction({ action: "next_episode" });
       } else if (action === "toggle-fav") {
-        toggleFavoriteAction(serverState.url, serverState.title);
+        toggleFavoriteAction(serverState.url, serverState.title, serverState.thumb);
       } else if (action === "open-history") {
         openHistoryBrowser();
       } else if (action === "open-episodes") {

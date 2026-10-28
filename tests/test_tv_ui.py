@@ -32,7 +32,7 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", ctype)
         self.assertIn("/static/tv/tv_player.css", html)
-        self.assertIn("/static/tv/tv_player.js", html)
+        self.assertIn("/static/tv/tv_player.js?v=9", html)
         self.assertIn('id="tv-video"', html)
         self.assertIn('id="tv-overlay"', html)
         self.assertIn('data-action="open-episodes"', html)
@@ -73,6 +73,7 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertIn("set_speed", js)
         self.assertIn("renderHistoryCarousel", js)
         self.assertIn("openHistoryItemModal", js)
+        self.assertIn("isUrlFavorite", js)
         self.assertIn("cast_from_tv", js)
 
         js_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "tv", "tv_player.js")

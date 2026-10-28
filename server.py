@@ -3367,6 +3367,7 @@ def build_tv_state_payload():
     hist_payload = build_tv_history_payload()
     cur_hist_item = next((it for it in hist_payload if it.get("url") == url), None)
     cur_watched_eps = cur_hist_item.get("watched_episodes", {}) if cur_hist_item else {}
+    cur_thumb = (cur_hist_item.get("thumb") if cur_hist_item else "") or cached.get("thumb") or ""
     return {
         "status": app_state.get("status", "idle"),
         "stage": app_state.get("stage", "extract"),
@@ -3398,6 +3399,7 @@ def build_tv_state_payload():
         "audio_tracks": app_state.get("audio_tracks", []),
         "audio_index": app_state.get("audio_index", 0),
         "opts": opts,
+        "thumb": cur_thumb,
         "next_url": bool(url and neighbor_episode(url, app_state.get("episode"), 1)),
         "prev_url": bool(url and neighbor_episode(url, app_state.get("episode"), -1)),
         "command_seq": tv_player_state.get("command_seq", 0),
