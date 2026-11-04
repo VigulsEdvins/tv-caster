@@ -92,6 +92,20 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertTrue(server.is_nextembed("https://kinogoo.zone/11180-papiny-dochki-novye-6-sezon.html"))
         self.assertEqual(server._ep_num("1-2"), 1)
 
+    def test_is_sportacentrs_and_extract(self):
+        url = "https://sportacentrs.com/sportacentrs_tv/live/29102026-b_ezerzeme_du_homelike_robezsardze_rsu_b_"
+        self.assertTrue(server.is_sportacentrs(url))
+        self.assertTrue(server.is_sportacentrs("https://live.tiesraides.lv/sportacentrs.tv/live/6?preroll=53"))
+        self.assertTrue(server.is_sportacentrs("https://cdn.tiesraides.lv/sportacentrs.com/test"))
+        self.assertFalse(server.is_sportacentrs("https://youtube.com/watch?v=123"))
+
+        info = server.inspect_url(url)
+        self.assertTrue(info.get("ok"))
+        self.assertEqual(info.get("kind"), "live")
+        self.assertIn("Ezerzeme", info.get("title", ""))
+        self.assertIn("720p", info.get("qualities", []))
+        self.assertTrue(info.get("thumb", "").startswith("http"))
+
     def test_direct_stream_set_speed_and_seek_do_not_respawn_cast(self):
         sid, _ = server.new_session()
         server.app_state["url"] = "https://rezka.ag/films/test.html"
