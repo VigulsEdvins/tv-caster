@@ -2450,8 +2450,11 @@ DL_WORKERS = 8
 DL_CHUNK = 8 * 1024 * 1024
 DL_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-def urlopen_fast(req, connect_timeout=4, read_timeout=30, attempts=3):
+def urlopen_fast(req, connect_timeout=4, read_timeout=30, attempts=3, timeout=None):
     """urlopen that gives up on a dead address after a few seconds (servers with several A records)."""
+    if timeout is not None:
+        connect_timeout = timeout
+        read_timeout = timeout
     last = None
     for _ in range(attempts):
         try:
@@ -3292,9 +3295,9 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             if data.get("is_live"):
                 stream_url = data.get("stream_url")
                 if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
-                    start_direct_stream(session_id, title, stream_url, headers={"Referer": "https://tiesraides.lv/"}, kind="hls", speed=speed, start_at=start_at, quality=quality)
+                    start_direct_stream(session_id, title, stream_url, headers=None, kind="hls", speed=speed, start_at=start_at, quality=quality)
                 else:
-                    threading.Thread(target=download_and_stream_hls, args=(session_id, title, stream_url, {"Referer": "https://tiesraides.lv/"}, speed, quality), daemon=True).start()
+                    threading.Thread(target=download_and_stream_hls, args=(session_id, title, stream_url, None, speed, quality), daemon=True).start()
             else:
                 urls = data.get("urls") or [data.get("stream_url")]
                 if len(urls) >= 2:
@@ -4323,8 +4326,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         req_headers = dict((ds or {}).get("headers") or {"User-Agent": "Mozilla/5.0"})
         final_url = resolve_redirects(target_url, req_headers)
         m3u8_text = curl_fetch(final_url, req_headers, max_time=10)
-        if not m3u8_text:
-            self.send_error(502, "Upstream HLS playlist empty")
+        if not m3u8_text or not m3u8_text.strip().startswith("#EXTM3U"):
+            self.send_error(502, "Upstream HLS playlist invalid or empty")
             return
         rewritten = rewrite_hls_playlist(m3u8_text, final_url, sid)
         body = rewritten.encode("utf-8")
@@ -4361,7 +4364,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         cancel_event = session_info.get("cancel_event") if session_info else threading.Event()
         try:
             req = urllib.request.Request(target_url, headers=hdrs)
-            with urlopen_fast(req, timeout=20) as r:
+            with urlopen_fast(req, connect_timeout=5, read_timeout=20) as r:
                 self.send_response(r.status)
                 ctype = r.headers.get("Content-Type") or ("video/mp2t" if ".ts" in target_url else "video/mp4")
                 self.send_header("Content-Type", ctype)
