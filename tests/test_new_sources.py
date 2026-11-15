@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -258,6 +259,50 @@ class TestEnvironment(unittest.TestCase):
             if server.check_environment():
                 self.skipTest("playwright is not installed here")
             self.assertEqual(server.check_environment(), [])
+
+
+class TestSessionLimits(unittest.TestCase):
+    def setUp(self):
+        self.saved = (dict(server.active_sessions), server.current_session_id, dict(server._direct_sessions))
+        server.active_sessions.clear()
+        server._direct_sessions.clear()
+        p = mock.patch.object(server, "cleanup_cache")
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        server.active_sessions.clear()
+        server.active_sessions.update(self.saved[0])
+        server.current_session_id = self.saved[1]
+        server._direct_sessions.clear()
+        server._direct_sessions.update(self.saved[2])
+
+    def test_only_the_newest_running_sessions_survive(self):
+        ids = []
+        for _ in range(server.MAX_ACTIVE_SESSIONS + 3):
+            sid, _f = server.new_session(seamless=True)  # seamless keeps the previous one running, like rapid seeks
+            ids.append(sid)
+            time.sleep(0.002)
+        running = [s for s in ids if server.active_sessions[s]["active"]]
+        self.assertEqual(running, ids[-server.MAX_ACTIVE_SESSIONS:])
+        self.assertTrue(all(server.active_sessions[s]["cancel_event"].is_set() for s in ids[:-server.MAX_ACTIVE_SESSIONS]))
+
+    def test_old_finished_sessions_are_forgotten(self):
+        for i in range(server.KEEP_FINISHED_SESSIONS + 10):
+            server.active_sessions[i + 1] = {"file": "x", "active": False, "cancel_event": threading.Event(), "procs": set()}
+            server._direct_sessions[i + 1] = {"url": "u"}
+        server.new_session()
+        self.assertLessEqual(len(server.active_sessions), server.KEEP_FINISHED_SESSIONS + 1)
+        self.assertNotIn(1, server.active_sessions)
+        self.assertNotIn(1, server._direct_sessions)
+        self.assertIn(server.current_session_id, server.active_sessions)
+
+    def test_cache_put_drops_oldest(self):
+        c = {}
+        for i in range(5):
+            server._cache_put(c, i, i, limit=3)
+        self.assertEqual(list(c), [2, 3, 4])
 
 
 class TestCache(unittest.TestCase):

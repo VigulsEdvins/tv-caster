@@ -1140,8 +1140,8 @@ def inspect_local_file(path):
         "qualities": ["Оригинал"],
         "speeds": speeds,
     }
-    _inspect_cache[resolved] = res
-    _inspect_cache[path] = res
+    _cache_put(_inspect_cache, resolved, res)
+    _cache_put(_inspect_cache, path, res)
     hist_items = build_tv_history_payload()
     matched_hist = next((it for it in hist_items if it.get("url") in (resolved, path)), None)
     if matched_hist:
@@ -1506,7 +1506,7 @@ def inspect_url(url):
             "qualities": ["1080p", "720p", "480p"],
             "speeds": speeds
         }
-    _inspect_cache[url] = res
+    _cache_put(_inspect_cache, url, res)
     hist_items = build_tv_history_payload()
     matched_hist = next((it for it in hist_items if it.get("url") == url), None)
     if matched_hist:
@@ -2689,6 +2689,7 @@ def stream_dash_live(session_id, title, urls, duration=0.0, start_at=0, speed="1
             cmd += ["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]
         cmd += ["-c:a", "aac", "-ac", "2", "-b:a", "192k", "-f", "mpegts", info["file"]]
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=_die_with_parent)
+        info["procs"].add(proc)  # cancel_session() kills it at once instead of waiting for the poll loop
         local_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
         while proc.poll() is None:
             if cancel_event.is_set():
@@ -2915,6 +2916,25 @@ def stream_local_video(session_id, title, resolved_path, speed="1.0x", audio_idx
         if proc and proc.poll() is None:
             proc.kill()
 
+MAX_ACTIVE_SESSIONS = 3   # running sessions (ffmpeg/downloads) at once; rapid seeks otherwise pile them up
+KEEP_FINISHED_SESSIONS = 20
+
+def _prune_sessions():
+    """Called under session_lock: cancel the oldest running sessions beyond the cap, forget old finished ones."""
+    running = sorted(sid for sid, i in active_sessions.items() if i.get("active"))
+    for sid in running[:-MAX_ACTIVE_SESSIONS]:
+        cancel_session(active_sessions[sid])
+    finished = sorted(sid for sid, i in active_sessions.items() if not i.get("active") and sid != current_session_id)
+    for sid in finished[:-KEEP_FINISHED_SESSIONS]:
+        active_sessions.pop(sid, None)
+        _direct_sessions.pop(sid, None)
+
+def _cache_put(cache, key, value, limit=200):
+    """dict cache with a size limit (oldest entry dropped first)."""
+    cache[key] = value
+    while len(cache) > limit:
+        cache.pop(next(iter(cache)))
+
 def new_session(keep_extra=(), seamless=False):
     """Cancel the running session and register a new one; returns (session_id, session_file)."""
     global current_session_id
@@ -2934,6 +2954,7 @@ def new_session(keep_extra=(), seamless=False):
             "cancel_event": threading.Event(),
             "procs": set(),
         }
+        _prune_sessions()
         cached_mp4s = {e["path"] for e in _mp4_cache.values() if e.get("path")}
         keep_set = {session_file, *keep_extra, *cached_mp4s}
         if prev_file:
