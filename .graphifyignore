@@ -1,0 +1,5 @@
+# data, not code: recorded network responses and local state
+tests/fixtures/
+tv.json
+favorites.json
+history.json
