@@ -41,6 +41,14 @@ class FakeResp(io.BytesIO):
 
 
 class TestSeasonvar(unittest.TestCase):
+    def test_qualities_come_from_file_names(self):
+        def fake_open(req, timeout=0):
+            n = "S01E01.1080p.mp4" if "transHDRezka" in req.full_url else "S01E01.WEBRip.720p.mp4"
+            return FakeResp(json.dumps([{"title": "1 серия", "file": enc("//cdn.x/" + n)}]).encode())
+        with mock.patch.object(seasonvar, "fetch_page", return_value=PAGE), mock.patch.object(seasonvar.urllib.request, "urlopen", fake_open):
+            d = seasonvar.seasonvar_structure("https://seasonvar.ru/serial-1-x.html")
+        self.assertEqual(d["qualities"], ["1080p", "720p"])
+
     def test_decode_and_flatten(self):
         self.assertEqual(seasonvar._sv_file(enc("//cdn.x/a.mp4")), "https://cdn.x/a.mp4")
         items = [{"title": "1"}, {"folder": [{"title": "2"}, {"title": "3"}]}]
@@ -58,6 +66,7 @@ class TestSeasonvar(unittest.TestCase):
         self.assertEqual([v["title"] for v in d["translations"]], ["Стандартный", "HDRezka"])
         self.assertEqual(d["thumb"], "https://cdn.example/p.jpg")
         self.assertEqual(d["title"], "Тест")
+        self.assertEqual(d["qualities"], ["1080p"])  # the fake files have no quality in their names
         self.assertTrue(seasonvar.is_seasonvar("https://seasonvar.ru/serial-1-x.html"))
 
 

@@ -57,6 +57,9 @@ def seasonvar_structure(url):
         raise Exception("seasonvar: empty playlist")
     th = re.search(r'property="og:image" content="([^"]+)"', page)
     thumb = th.group(1) if th else ""
+    # the files carry their quality in the name (…1080p…, …720p…); the list shown for choosing must not promise more than exists
+    found = {int(h) for fm in files.values() for f in fm.values() for h in re.findall(r"(?<!\d)(\d{3,4})p", f.rsplit("/", 1)[-1])}
+    qualities = [f"{h}p" for h in sorted(found, reverse=True)] or ["1080p"]
     eps = [{"id": e, "title": f"Серия {int(e[4:])}", "translations": voices if len(voices) > 1 else []} for e in first]
     return {"title": title, "kind": "series", "seasons": [{"id": "s%02d" % season, "title": f"Сезон {season}", "episodes": eps}],
-            "translations": voices if len(voices) > 1 else [], "files": files, "thumb": "https:" + thumb if thumb.startswith("//") else thumb}
+            "translations": voices if len(voices) > 1 else [], "files": files, "qualities": qualities, "thumb": "https:" + thumb if thumb.startswith("//") else thumb}

@@ -1405,7 +1405,7 @@ def inspect_url(url):
         data = seasonvar_structure(url)
         series_episodes(url, info=data)
         res = {"ok": True, "title": data["title"], "kind": "series", "seasons": data["seasons"],
-               "translations": data["translations"], "qualities": ["1080p"], "speeds": speeds, "thumb": data["thumb"]}
+               "translations": data["translations"], "qualities": data["qualities"], "speeds": speeds, "thumb": data["thumb"]}
     elif "kinogo" in url or "cinemar.cc" in url:
         data = extract_kinogo(url, mode="info")
         if data.get("kind") == "series":
