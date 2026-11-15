@@ -149,6 +149,66 @@ def _fake_playwright(urls):
     return {"playwright": mock.Mock(), "playwright.sync_api": mod}, browser
 
 
+class TestYtdlpAutoUpdate(unittest.TestCase):
+    def setUp(self):
+        from extractors import youtube
+        self.yt = youtube
+        youtube._ytdlp_cache.clear()
+        youtube._update["last"] = 0.0
+        self.addCleanup(lambda: youtube._update.update(last=0.0))
+
+    def test_looks_outdated_only_for_extractor_breakage(self):
+        self.assertTrue(self.yt.looks_outdated("yt-dlp could not extract: ERROR: Unable to extract nsig function"))
+        self.assertTrue(self.yt.looks_outdated("ERROR: unable to download video data: HTTP Error 403: Forbidden"))
+        self.assertFalse(self.yt.looks_outdated("ERROR: [youtube] x: This video has been removed for violating YouTube's Terms of Service"))
+        self.assertFalse(self.yt.looks_outdated("ERROR: [youtube] x: Private video"))
+
+    def _fail_then_ok(self, error):
+        calls = []
+
+        def fake(url, quality):
+            calls.append(1)
+            if len(calls) == 1:
+                raise Exception(error)
+            return ("T", ["v", "a"], 5.0)
+        return fake, calls
+
+    def test_outdated_error_updates_then_retries_once(self):
+        fake, calls = self._fail_then_ok("yt-dlp could not extract: ERROR: Unable to extract nsig")
+        with mock.patch.object(self.yt, "_ytdlp_streams", fake), mock.patch.object(self.yt, "update_ytdlp", return_value=True) as upd:
+            self.assertEqual(self.yt.ytdlp_streams("https://youtu.be/x", "720p")[0], "T")
+        self.assertEqual((len(calls), upd.call_count), (2, 1))
+
+    def test_removed_video_does_not_update(self):
+        fake, calls = self._fail_then_ok("yt-dlp could not extract: ERROR: This video has been removed")
+        with mock.patch.object(self.yt, "_ytdlp_streams", fake), mock.patch.object(self.yt, "update_ytdlp") as upd:
+            with self.assertRaises(Exception):
+                self.yt.ytdlp_streams("https://youtu.be/x", "720p")
+        upd.assert_not_called()
+
+    def test_unchanged_version_keeps_the_original_error(self):
+        fake, calls = self._fail_then_ok("yt-dlp could not extract: ERROR: Unable to extract nsig")
+        with mock.patch.object(self.yt, "_ytdlp_streams", fake), mock.patch.object(self.yt, "update_ytdlp", return_value=False):
+            with self.assertRaises(Exception) as ctx:
+                self.yt.ytdlp_streams("https://youtu.be/x", "720p")
+        self.assertIn("nsig", str(ctx.exception))
+        self.assertEqual(len(calls), 1)
+
+    def test_update_runs_pip_once_per_cooldown_and_reports_version_change(self):
+        versions = iter(["2026.10.21", "2026.11.15"])
+        runs = []
+
+        def fake_run(cmd, *a, **kw):
+            if "pip" in cmd:
+                runs.append(cmd)
+            return mock.Mock(stdout="", returncode=0)
+        with mock.patch.object(self.yt, "ytdlp_version", lambda: next(versions)), mock.patch.object(self.yt.subprocess, "run", fake_run):
+            self.assertTrue(self.yt.update_ytdlp(now=1_000_000))
+            self.assertFalse(self.yt.update_ytdlp(now=1_000_100))  # inside the cooldown: no second pip run
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][1:6], ["-m", "pip", "install", "-U", "yt-dlp"])
+
+
 class TestLiveballExtractor(unittest.TestCase):
     def setUp(self):
         from extractors import liveball

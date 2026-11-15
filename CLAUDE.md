@@ -45,7 +45,8 @@ extractors/               «чистые» извлекатели ссылок, 
   net.py                  urlopen_fast, fetch_page, DNS-обход через DoH (socket.getaddrinfo патчится при импорте),
                           curl_fetch, curl_fetch_bytes, resolve_redirects, DL_HEADERS
   tools.py                VENV_DIR, YT_DLP_BIN, NODE_BIN, YT_DLP_BASE
-  youtube.py              ytdlp_streams(url, quality) -> (title, [video_url, audio_url], duration); кэш 20 мин (_ytdlp_cache)
+  youtube.py              ytdlp_streams(url, quality) -> (title, [video_url, audio_url], duration); кэш 20 мин (_ytdlp_cache);
+                          при ошибке вида «unable to extract/nsig/403» один раз в 6 ч делает `pip install -U yt-dlp` в окружении, где он стоит, и повторяет запрос
   nextembed.py            nextembed_data/structure/resolve, parse_master, media_segments, is_nextembed (nextembed/kinogram/gidonline/moy.su)
   kinogo.py               resolve_kinogo_url, resolve_kinozed_url, extract_kinogo (node + extract_kinogo.js), is_kinogo, is_blocked_site
   rezka.py                tulsa-king.net / rezka: структура сезонов и озвучек, extract_rezka
