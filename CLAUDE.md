@@ -20,8 +20,11 @@ tools/build_apk.sh              # собрать static/tv-caster-player.apk
 - Внешние программы: `yt-dlp` (YouTube и общие ссылки), `/usr/bin/ffmpeg` (потоковая склейка), `~/.local/bin/ffmpeg`
   (встроенная статическая сборка 2018 года, `get_ffmpeg()`), `node` (kinogo/cinemar и `yt-dlp` JS), `adb`, `google-chrome` +
   Python-пакет `playwright` (только для LiveBall; см. `requirements.txt`).
-- Перезапуск сервера: `kill $(pgrep -f "^python3 server.py")`, затем `(setsid nohup python3 server.py >/tmp/tvcaster.log 2>&1 </dev/null &)`.
-  **Не** писать `pkill -f "python3 server.py"` внутри команды Bash: шаблон совпадает с самой командой и убивает оболочку (exit 144).
+- Сервер работает как systemd-юнит пользователя `tv-caster` (шаблон `deploy/tv-caster.service`, установка `tools/install_service.sh [--start]`;
+  автозапуск при загрузке, `linger=yes`). Перезапуск: `systemctl --user restart tv-caster`, логи: `journalctl --user -u tv-caster -f`,
+  состояние: `systemctl --user status tv-caster`. Юнит перезапускается сам после падения/`kill` (`Restart=always`).
+  Ручной запуск (`./start.sh`) занимает порт 8080 — сначала `systemctl --user stop tv-caster`.
+  **Не** убивать сервер через `kill`/`pkill -f "python3 server.py"`: pkill внутри команды Bash совпадает с самой командой и убивает оболочку (exit 144).
 
 ## Железо и сеть (на момент написания)
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=TV Caster server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 @PROJECT_DIR@/server.py
+WorkingDirectory=@PROJECT_DIR@
+Environment=PYTHONUNBUFFERED=1
+# Restart after a crash or a kill, not only on a non-zero exit; `systemctl --user stop` still stops it for good
+Restart=always
+RestartSec=3
+# ffmpeg and the other children die with the server (also enforced inside server.py via PR_SET_PDEATHSIG)
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
