@@ -3388,6 +3388,7 @@ def stream_dash_live(session_id, title, urls, duration=0.0, start_at=0, speed="1
             app_state.update(status="downloading", stage="download", status_text="Запускаю поток", title=title, download_progress=0)
             if duration > 0:
                 tv_player_state["duration"] = float(duration)
+            _notify_tv_listeners()
         seek = max(0, int(start_at or 0))
         if duration > 0 and seek >= duration - 5:
             seek = 0
@@ -3455,6 +3456,7 @@ def stream_dash_live(session_id, title, urls, duration=0.0, start_at=0, speed="1
             print("live remux dropped mid-playback, restarting:", e, flush=True)
             if session_id == current_session_id:
                 app_state.update(status="downloading", stage="download", status_text="Связь прервалась, перезапускаю…")
+                _notify_tv_listeners()
             on_drop()
             return
         info["active"] = False
