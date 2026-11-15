@@ -17,3 +17,7 @@ history.json
 
 # graphify output
 graphify-out/
+
+# local user data and build artifacts
+favorites.json
+static/*.apk.idsig
