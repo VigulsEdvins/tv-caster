@@ -3777,6 +3777,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                     _issue_tv_command("speed", target=spd)
                     self.send_json({"ok": True, "speed": spd})
                     return
+                app_state.update(status="preparing", stage="extract", status_text=f"Меняю скорость: {spd}…", download_progress=0)
+                _notify_tv_listeners()
                 threading.Thread(
                     target=handle_cast_request,
                     kwargs=dict(
@@ -3905,6 +3907,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 if not url:
                     self.send_json({"ok": True, "quality": qual})
                     return
+                app_state.update(status="preparing", stage="extract", status_text=f"Меняю качество: {qual}…", download_progress=0)
+                _notify_tv_listeners()
                 threading.Thread(
                     target=handle_cast_request,
                     kwargs=dict(

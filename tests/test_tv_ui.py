@@ -98,7 +98,7 @@ class TestTVPlayerUI(unittest.TestCase):
             proc = subprocess.run([node_bin, "--check", js_file], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, f"JS syntax error: {proc.stderr}")
 
-    def test_seek_on_remuxed_stream_shows_status_and_restarts_cast(self):
+    def _action_on_remuxed_stream(self, payload):
         sid = 515151
         server.active_sessions[sid] = {"file": "x.ts", "active": True, "cancel_event": threading.Event(), "procs": set()}
         saved = (server.current_session_id, dict(server.app_state))
@@ -107,21 +107,36 @@ class TestTVPlayerUI(unittest.TestCase):
         started = []
         try:
             with mock.patch.object(server, "handle_cast_request", lambda **kw: started.append(kw)):
-                req = urllib.request.Request(f"{self.base_url}/api/tv/action", data=json.dumps({"action": "seek", "target": 600}).encode(),
+                req = urllib.request.Request(f"{self.base_url}/api/tv/action", data=json.dumps(payload).encode(),
                                              headers={"Content-Type": "application/json"}, method="POST")
                 urllib.request.urlopen(req, timeout=5).read()
                 for _ in range(20):
                     if started:
                         break
                     threading.Event().wait(0.05)
-            self.assertEqual(server.app_state["status_text"], "Перематываю…")
-            self.assertEqual(started[0]["start_at"], 600)
-            self.assertTrue(started[0]["seamless"])
+            return server.app_state["status_text"], started[0]
         finally:
             server.active_sessions.pop(sid, None)
             server.current_session_id = saved[0]
             server.app_state.clear()
             server.app_state.update(saved[1])
+
+    def test_seek_on_remuxed_stream_shows_status_and_restarts_cast(self):
+        text, call = self._action_on_remuxed_stream({"action": "seek", "target": 600})
+        self.assertEqual(text, "Перематываю…")
+        self.assertEqual(call["start_at"], 600)
+        self.assertTrue(call["seamless"])
+
+    def test_switch_quality_shows_status_and_restarts_cast_with_new_quality(self):
+        text, call = self._action_on_remuxed_stream({"action": "switch_quality", "quality": "1080p"})
+        self.assertEqual(text, "Меняю качество: 1080p…")
+        self.assertEqual(call["quality"], "1080p")
+        self.assertTrue(call["seamless"])
+
+    def test_set_speed_shows_status_and_restarts_cast_with_new_speed(self):
+        text, call = self._action_on_remuxed_stream({"action": "set_speed", "speed": "1.5x"})
+        self.assertEqual(text, "Меняю скорость: 1.5x…")
+        self.assertEqual(call["speed"], "1.5x")
 
     def test_tv_js_shows_loading_box_while_stream_restarts(self):
         _, js, _ = self._get("/static/tv/tv_player.js")
