@@ -208,15 +208,39 @@ def discover_renderers():
             print("Renderer description failed for", ip, e)
     return devices
 
+PLAYER_NAME = "TV Caster Player"
+
+def player_device():
+    """The Android TV box that runs the player app: it has no UPnP, so it is found by its open ADB port instead."""
+    ip = _adb_host.get("ip") or TV_IP
+    try:
+        socket.create_connection((ip, 5555), timeout=1).close()
+    except OSError:
+        return None
+    return {"ip": ip, "name": PLAYER_NAME, "player": True,
+            "controls": {"AVTransport": {"url": f"http://{ip}:{TV_PORT}/serviceControl/AVTransport",
+                                         "type": "urn:schemas-upnp-org:service:AVTransport:1"},
+                         "RenderingControl": {"url": f"http://{ip}:{TV_PORT}/serviceControl/RenderingControl",
+                                              "type": "urn:schemas-upnp-org:service:RenderingControl:1"}}}
+
+def list_tvs(devices=None):
+    """UPnP renderers plus the player box, so the picker offers the device that actually shows the video."""
+    devices = list(refresh_tv() if devices is None else devices)
+    box = player_device()
+    if box and all(d["ip"] != box["ip"] for d in devices):
+        devices.append(box)
+    return devices
+
 def select_tv(dev):
     with tv_lock:
         TV["ip"] = dev["ip"]
         TV["name"] = dev["name"]
         TV["controls"] = dev["controls"]
+        TV["player"] = bool(dev.get("player"))
         TV["online"] = True
     try:
         with open(TV_STATE_FILE, "w") as f:
-            json.dump({"ip": dev["ip"], "name": dev["name"], "controls": dev["controls"]}, f, indent=2)
+            json.dump({"ip": dev["ip"], "name": dev["name"], "controls": dev["controls"], "player": TV["player"]}, f, indent=2)
     except OSError:
         pass
 
@@ -230,6 +254,8 @@ def refresh_tv(prefer_ip=None):
         if dev["ip"] == want:
             select_tv(dev)
             return devices
+    if TV.get("player") and want == TV["ip"]:
+        return devices  # the chosen player box has no UPnP: do not swap it for the only renderer found
     if len(devices) == 1:
         select_tv(devices[0])
     return devices
@@ -239,7 +265,8 @@ def _load_saved_tv():
         with open(TV_STATE_FILE) as f:
             saved = json.load(f)
         if saved.get("controls", {}).get("AVTransport"):
-            TV.update({"ip": saved["ip"], "name": saved.get("name", saved["ip"]), "controls": saved["controls"]})
+            TV.update({"ip": saved["ip"], "name": saved.get("name", saved["ip"]), "controls": saved["controls"],
+                       "player": bool(saved.get("player"))})
     except Exception:
         pass
 
@@ -3634,7 +3661,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         elif clean == "/api/favorites":
             self.send_json({"ok": True, "items": build_tv_favorites_payload()})
         elif clean == "/api/tvs":
-            devices = refresh_tv()
+            devices = list_tvs()
             self.send_json({"current": TV["ip"], "devices": [{"ip": d["ip"], "name": d["name"]} for d in devices]})
         elif clean == "/api/search":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("q", [""])[0]
@@ -3953,7 +3980,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
 
         elif clean == "/api/tv":
             ip = data.get("ip")
-            dev = next((d for d in refresh_tv(prefer_ip=ip) if d["ip"] == ip), None)
+            dev = next((d for d in list_tvs(refresh_tv(prefer_ip=ip)) if d["ip"] == ip), None)
             if dev:
                 select_tv(dev)
             self.send_json({"ok": bool(dev), "current": TV["ip"], "name": TV["name"]})

@@ -206,6 +206,46 @@ class TestLiveballMatchList(unittest.TestCase):
             liveball.liveball_match_url("https://liveball.sx/", None)
 
 
+class TestTvPicker(unittest.TestCase):
+    PHILIPS = {"ip": "10.0.0.2", "name": "PHILIPS TV", "controls": {"AVTransport": {"url": "u", "type": "t"}}}
+
+    def setUp(self):
+        self.saved = dict(server.TV)
+        self.addCleanup(lambda: (server.TV.clear(), server.TV.update(self.saved)))
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp.close()
+        self.addCleanup(os.remove, tmp.name)
+        p = mock.patch.object(server, "TV_STATE_FILE", tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+        self.state_file = tmp.name
+
+    def test_player_box_is_offered_next_to_upnp_renderers(self):
+        with mock.patch.object(server.socket, "create_connection", return_value=mock.Mock()):
+            devs = server.list_tvs([self.PHILIPS])
+        self.assertEqual([d["name"] for d in devs], ["PHILIPS TV", server.PLAYER_NAME])
+        self.assertTrue(devs[1]["player"])
+
+    def test_box_without_open_adb_port_is_not_offered(self):
+        with mock.patch.object(server.socket, "create_connection", side_effect=OSError):
+            self.assertEqual(server.list_tvs([self.PHILIPS]), [self.PHILIPS])
+
+    def test_chosen_player_box_survives_rediscovery_and_is_saved(self):
+        box = {"ip": "10.0.0.9", "name": server.PLAYER_NAME, "player": True, "controls": self.PHILIPS["controls"]}
+        server.select_tv(box)
+        self.assertEqual(json.load(open(self.state_file))["player"], True)
+        with mock.patch.object(server, "discover_renderers", return_value=[self.PHILIPS]):
+            server.refresh_tv()  # the only renderer found must not replace the chosen box
+        self.assertEqual((server.TV["ip"], server.TV["name"]), ("10.0.0.9", server.PLAYER_NAME))
+
+    def test_single_renderer_is_still_auto_selected_without_a_player_choice(self):
+        server.TV["player"] = False
+        server.TV["ip"] = "10.0.0.99"
+        with mock.patch.object(server, "discover_renderers", return_value=[self.PHILIPS]):
+            server.refresh_tv()
+        self.assertEqual(server.TV["ip"], "10.0.0.2")
+
+
 class TestEnvironment(unittest.TestCase):
     def test_reports_each_missing_piece(self):
         with mock.patch.object(server.os.path, "exists", return_value=False), mock.patch.object(server.shutil, "which", return_value=None):
