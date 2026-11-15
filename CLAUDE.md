@@ -146,10 +146,16 @@ POST: `/api/inspect` (структура: сезоны, серии, озвучк
   (откат/перезапуск/лимит), кэш, `check_environment`.
 - `tests/test_sources_offline.py` + `tests/fixtures/pages.json`: rezka, kinogo, gidonline, kinogo-hd, nextembed на сохранённых страницах.
   Большие страницы обрезаны до того, что читает код. Обновление: заново скачать страницу и заменить запись.
-- `tests/test_direct_stream.py`, `test_tv_ui.py`, `test_tv_api.py`, ...: часть ходит в живую сеть и ломается при смене сайтов.
+- `tests/netfix.py`: запись/проигрывание сети для тестов. `@netfix.offline` (или `with netfix.replay()`) подменяет
+  `urllib.request.urlopen`, `fetch_page`, `curl_fetch` и вызовы `yt-dlp`/`node` ответами из `tests/fixtures/net.json` + `pages.json`;
+  незаписанный запрос = `AssertionError`. Обновить записи: `python3 tests/netfix.py` (ходит на живые сайты, сценарии в `SCENARIOS`).
+  Записи **очищаются** (`scrub`): JWT → `JWT`, любой IPv4 → `203.0.113.1` (в токенах LSM зашит внешний IP клиента) — не коммитить сырые ответы.
+- Весь набор без интернета: `unshare -rn sh -c 'ip link set lo up && python3 -m pytest -q tests --deselect tests/test_kinozed.py'`
+  (loopback нужен тестам с локальным сервером; `tests/test_kinozed.py` — личный файл пользователя, ходит на живой сайт,
+  офлайн-версия — `tests/test_kinozed_offline.py`).
 - **Подменять имя там, где его ищет код**: после выноса в `extractors/` функция использует свой `fetch_page`/`curl_fetch`,
   поэтому патчить нужно `extractors.nextembed.fetch_page`, `extractors.rezka.fetch_page`, `extractors.kinogo.curl_fetch` и т.д.,
-  а не `server.fetch_page`. Проверять запуском без сети (`unshare -rn`): иначе тест «проходит» через интернет.
+  а не `server.fetch_page`. Проверять запуском без сети (команда выше): иначе тест «проходит» через интернет.
 - Живая проверка на ТВ: `curl -X POST localhost:8080/api/cast -d '{"url":...}'`, затем `/api/status` и скриншот ТВ.
 
 ## Подводные камни (выучено на практике)

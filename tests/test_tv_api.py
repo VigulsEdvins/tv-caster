@@ -9,6 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import netfix
 
 
 class TestTVApi(unittest.TestCase):
@@ -100,6 +102,7 @@ class TestTVApi(unittest.TestCase):
         self.assertTrue(server.is_replay_lsm("https://ltv.lsm.lv/embed/live?c=123"))
         self.assertFalse(server.is_replay_lsm("https://youtube.com/watch?v=123"))
 
+    @netfix.offline
     def test_inspect_lsm_url(self):
         url = "https://replay.lsm.lv/lv/skaties/tiesraide/ltv7/merdoka-noslepumi-9-detektivserials-originalvalodas-izvele"
         info = server.inspect_url(url)

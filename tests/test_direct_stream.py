@@ -9,6 +9,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import netfix
 
 
 class TestDirectStreamMode(unittest.TestCase):
@@ -109,6 +111,7 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertEqual(len(info["seasons"][0]["episodes"]), 6)
         self.assertTrue(info.get("thumb", "").startswith("http"))
 
+    @netfix.offline
     def test_is_sportacentrs_and_extract(self):
         url = "https://sportacentrs.com/sportacentrs_tv/live/29102026-b_ezerzeme_du_homelike_robezsardze_rsu_b_"
         self.assertTrue(server.is_sportacentrs(url))
@@ -123,6 +126,7 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertIn("720p", info.get("qualities", []))
         self.assertTrue(info.get("thumb", "").startswith("http"))
 
+    @netfix.offline
     def test_is_facebook_and_extract(self):
         fb_url = "https://www.facebook.com/vklotos/videos/2142310449990727/"
         self.assertTrue(server.is_facebook(fb_url))
@@ -178,6 +182,7 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertEqual(server.current_session_id, sid)
         self.assertEqual(server.tv_player_state["position"], 300.0)
 
+    @netfix.offline
     def test_gidonline_extraction_and_inspect(self):
         url = "https://ag.gidonline.fun/film/sokrovishhe-nacii/"
         self.assertTrue(server.is_nextembed(url))
@@ -188,6 +193,7 @@ class TestDirectStreamMode(unittest.TestCase):
         self.assertTrue(len(info.get("translations", [])) >= 5)
         self.assertTrue(info.get("thumb", "").startswith("http"))
 
+    @netfix.offline
     def test_kinogo_hd_moy_su_extraction_and_inspect(self):
         url = "https://kinogo-hd.moy.su/load/boeviki/sokrovishhe_nacii_3/10-1-0-1924"
         self.assertTrue(server.is_nextembed(url))
