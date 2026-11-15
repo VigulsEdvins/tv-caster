@@ -8,7 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server
-from extractors import rezka
+from extractors import kinogo, nextembed, rezka
 
 PAGES = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures", "pages.json"), encoding="utf-8"))
 
@@ -23,7 +23,8 @@ class OfflineSources(unittest.TestCase):
     def setUp(self):
         server._kinogo_url_cache.clear()
         server._series_cache.clear()
-        for target, name in ((server, "fetch_page"), (server, "curl_fetch"), (rezka, "fetch_page")):
+        for target, name in ((server, "fetch_page"), (server, "curl_fetch"), (rezka, "fetch_page"), (nextembed, "fetch_page"),
+                             (nextembed, "curl_fetch"), (kinogo, "fetch_page"), (kinogo, "curl_fetch")):
             p = mock.patch.object(target, name, _page)
             p.start()
             self.addCleanup(p.stop)
