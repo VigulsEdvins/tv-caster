@@ -31,7 +31,7 @@ from extractors.kinogo import extract_kinogo, IMDB_RE, _kinogo_url_cache, _kinog
 from extractors.net import urlopen_fast, fetch_page
 from extractors.rezka import REZKA_URL_RE, is_rezka, rezka_episode_id, rezka_target_url, rezka_structure, extract_rezka
 from extractors.mover import is_mover, extract_mover
-from extractors.liveball import is_liveball, extract_liveball
+from extractors.liveball import is_liveball, extract_liveball, is_liveball_home, liveball_match_url, liveball_matches
 from extractors.sportacentrs import is_sportacentrs, extract_sportacentrs
 from extractors.seasonvar import is_seasonvar, seasonvar_structure
 
@@ -1435,6 +1435,12 @@ def inspect_url(url):
             "duration": dur,
             "thumb": thumb,
         }
+    elif is_liveball_home(url):
+        matches = liveball_matches(url)
+        if not matches:
+            raise Exception("liveball: no running or upcoming matches on this page")
+        res = {"ok": True, "title": "LiveBall: матчи", "kind": "series", "translations": [], "qualities": ["720p"], "speeds": speeds,
+               "seasons": [{"id": "s01", "title": "Матчи", "episodes": [{"id": m["id"], "title": m["title"], "translations": []} for m in matches]}]}
     elif is_liveball(url):
         data = extract_liveball(url)
         res = {"ok": True, "title": data["title"], "kind": "live", "seasons": [], "translations": [],
@@ -3265,7 +3271,7 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             else:
                 threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
         elif is_liveball(url):
-            data = extract_liveball(url)
+            data = extract_liveball(liveball_match_url(url, episode))
             title = data["title"]
             phase(session_id, "liveball extracted")
             remember(title)

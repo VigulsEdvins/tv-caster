@@ -172,6 +172,40 @@ class TestLiveballExtractor(unittest.TestCase):
         browser.close.assert_called_once()
 
 
+def _fixture(mid, st, ts, home, away, score="– : –"):
+    return (f'<a class="lb-fixture" href="/match/{mid}" data-st="{st}" data-ts="{ts}" data-teams="1,2">\n'
+            f'<span class="lb-fixture__time" data-ts="{ts}">x</span>\n'
+            f'<span class="lb-fixture__home"><span>{home}</span><img src="a.png"></span>\n'
+            f'<span class="lb-fixture__score lb-score">{score}</span>\n'
+            f'<span class="lb-fixture__away"><img src="b.png"><span>{away}</span></span>\n<span>→</span>\n</a>\n')
+
+
+class TestLiveballMatchList(unittest.TestCase):
+    NOW = 1_800_000_000
+
+    def test_running_first_then_upcoming_skipping_finished_and_stale(self):
+        from extractors import liveball
+        page = "".join([
+            _fixture(1, "up", self.NOW + 7200, "Future", "Team"),            # upcoming
+            _fixture(2, "up", self.NOW - 1800, "Running &amp; Co", "Other"),  # started 30 min ago -> running
+            _fixture(3, "fin", self.NOW - 9000, "Done", "Match", "2 : 1"),    # finished
+            _fixture(4, "up", self.NOW - 5 * 3600, "Stale", "Match"),         # "up" for 5 h: stale
+        ])
+        ms = liveball.liveball_matches("https://liveball.sx/", now=self.NOW, page=page)
+        self.assertEqual([m["id"] for m in ms], ["m2", "m1"])
+        self.assertTrue(ms[0]["live"] and not ms[1]["live"])
+        self.assertIn("Running & Co – Other 🔴", ms[0]["title"])
+
+    def test_match_url_from_list_page_and_direct_link(self):
+        from extractors import liveball
+        self.assertTrue(liveball.is_liveball_home("https://liveball.sx/"))
+        self.assertFalse(liveball.is_liveball_home("https://liveball.sx/match/5"))
+        self.assertEqual(liveball.liveball_match_url("https://liveball.sx/", "m77"), "https://liveball.sx/match/77")
+        self.assertEqual(liveball.liveball_match_url("https://liveball.sx/match/5", None), "https://liveball.sx/match/5")
+        with self.assertRaises(Exception):
+            liveball.liveball_match_url("https://liveball.sx/", None)
+
+
 class TestEnvironment(unittest.TestCase):
     def test_reports_each_missing_piece(self):
         with mock.patch.object(server.os.path, "exists", return_value=False), mock.patch.object(server.shutil, "which", return_value=None):

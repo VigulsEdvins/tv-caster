@@ -110,7 +110,7 @@ nextembed, kinogo → встроенный плеер), и дальше ветв
 | tulsa-king.net, rezka | `rezka.rezka_structure`, `extract_rezka` | прямой MP4 |
 | kinogo*, gidonline, moy.su, nextembed, kinogram, IMDb, kinopoisk | `normalize_url` → `nextembed.*` | прямой HLS (дорожка 0) или `stream_nextembed_live` |
 | cinemar.cc | `kinogo.extract_kinogo` (node) | прямой HLS, Referer cinemar.cc |
-| liveball.* | `liveball.extract_liveball` | прямой HLS (токен ~4 ч), нужен headless Chrome |
+| liveball.* | `liveball.extract_liveball` | прямой HLS (токен ~4 ч), нужен headless Chrome. Главная/список (`liveball.sx/`) открывается как «сериал»: матчи = «серии» с id `m<ID>` (`liveball_matches`, идущие 🔴 первыми; «идёт» = начался <3 ч назад, т.к. в HTML статус только `up`/`fin`) |
 | replay.lsm.lv, ltv.lsm.lv | `lsm.extract_replay_lsm` | собственный master-плейлист `/lsm/master.m3u8` |
 | sportacentrs.com, tiesraides.lv | `sportacentrs.*` | HLS / DASH |
 | mover.uz | `mover.extract_mover` | прямой MP4 |
