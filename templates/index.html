@@ -606,7 +606,7 @@
     }
     .search-input-field {
       width: 100%;
-      padding: 14px 44px 14px 44px;
+      padding: 14px 80px 14px 44px;
       border-radius: var(--radius-md);
       background: rgba(15, 23, 42, 0.85);
       border: 1px solid var(--border);
@@ -622,7 +622,7 @@
     }
     .input-clear-btn {
       position: absolute;
-      right: 12px;
+      right: 44px;
       background: transparent;
       border: none;
       color: var(--text-dim);
@@ -632,6 +632,182 @@
       display: none;
     }
     .input-clear-btn:hover { color: var(--text); }
+    .input-browse-btn {
+      position: absolute;
+      right: 10px;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      color: var(--primary);
+      border-radius: var(--radius-sm);
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .input-browse-btn:hover {
+      background: var(--primary);
+      color: #0b1120;
+    }
+    .local-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(3, 7, 18, 0.78);
+      backdrop-filter: blur(8px);
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .local-modal {
+      background: #0b1329;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      width: 100%;
+      max-width: 580px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.7);
+      overflow: hidden;
+      animation: modalFadeIn 0.2s ease;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .local-modal-head {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(15, 23, 42, 0.5);
+    }
+    .local-modal-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+    }
+    .local-modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      font-size: 1.3rem;
+      cursor: pointer;
+      padding: 4px;
+      line-height: 1;
+    }
+    .local-modal-close:hover { color: #fff; }
+    .local-quick-bar {
+      display: flex;
+      gap: 6px;
+      padding: 10px 16px;
+      background: rgba(15, 23, 42, 0.4);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      flex-wrap: wrap;
+    }
+    .quick-chip {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 0.78rem;
+      padding: 4px 10px;
+      border-radius: var(--radius-full);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .quick-chip:hover {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    .local-path-bar {
+      padding: 8px 16px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.2);
+    }
+    .local-up-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 0.78rem;
+    }
+    .local-up-btn:hover { background: rgba(255, 255, 255, 0.15); }
+    .local-path-text {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+    .local-file-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 12px;
+      min-height: 220px;
+      max-height: 380px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.15s;
+      font-size: 0.88rem;
+    }
+    .file-item:hover {
+      background: rgba(56, 189, 248, 0.12);
+    }
+    .file-item.folder {
+      color: #e2e8f0;
+      font-weight: 500;
+    }
+    .file-item.video {
+      color: #38bdf8;
+    }
+    .file-item-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-item-size {
+      font-size: 0.76rem;
+      color: var(--text-dim);
+    }
+    .local-modal-foot {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.4);
+    }
 
     /* Search Results Dropdown */
     .search-results {
@@ -1103,8 +1279,38 @@
             <svg class="input-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.35-4.35"></path>
             </svg>
-            <input class="search-input-field" id="urlInput" type="url" inputmode="url" placeholder="Ссылка (Kinogo, LSM, nextembed) или название фильма…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+            <input class="search-input-field" id="urlInput" type="text" placeholder="Ссылка, файл с ноутбука (elga/video.mp4) или название…" autocomplete="off" autocapitalize="off" spellcheck="false" />
             <button class="input-clear-btn" id="clearInputBtn" title="Очистить">✕</button>
+            <button class="input-browse-btn" id="browseLocalBtn" type="button" title="Выбрать видео с ноутбука">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Local File Browser Modal -->
+          <div class="local-modal-backdrop" id="localModalBackdrop">
+            <div class="local-modal">
+              <div class="local-modal-head">
+                <div class="local-modal-title">
+                  <span>💻</span><span>Видеофайлы на ноутбуке</span>
+                </div>
+                <button class="local-modal-close" id="closeLocalModalBtn" title="Закрыть">✕</button>
+              </div>
+              <div class="local-quick-bar" id="localQuickBar"></div>
+              <div class="local-path-bar">
+                <button class="local-up-btn" id="localUpBtn" title="На уровень выше">⬆️ Наверх</button>
+                <span class="local-path-text" id="localPathText">~</span>
+              </div>
+              <div class="local-file-list" id="localFileList"></div>
+              <div class="local-modal-foot">
+                <button class="btn btn-secondary" style="min-height: 36px; padding: 6px 14px; font-size: 0.82rem;" id="pickNativeFileBtn">
+                  📂 Выбрать через проводник…
+                </button>
+                <input type="file" id="nativeFileInput" accept="video/*" style="display:none" />
+                <span style="font-size: 0.78rem; color: var(--text-dim);">Поддерживаются MP4, MKV, AVI, WebM</span>
+              </div>
+            </div>
           </div>
 
           <!-- Auto Search Suggestions Dropdown -->
@@ -1402,7 +1608,7 @@
     // ---------- Inspect URL ----------
     async function inspectInputUrl() {
       const url = $('urlInput').value.trim();
-      if (!url.startsWith('http')) { $('optionsBox').style.display = 'none'; return; }
+      if (!isLink(url)) { $('optionsBox').style.display = 'none'; return; }
       if (url === lastInspected) return;
       lastInspected = url;
       $('optionsBox').style.display = 'flex';
@@ -1410,7 +1616,7 @@
       try {
         const data = await api('/api/inspect', { url });
         if (data.ok) {
-          if (data.title) $('detectedTitle').textContent = data.title;
+          if (data.title) $('detectedTitle').textContent = data.title + (data.is_local ? ' (Файл с ноутбука)' : '');
           seriesData = data.kind === 'series' ? data : null;
           if (seriesData && pendingSel && pendingSel.episode) {
             const sn = seriesData.seasons.find(x => x.episodes.some(e => e.id === pendingSel.episode));
@@ -2006,8 +2212,15 @@
       }
     }
 
-    // ---------- Title Search & Kinogo/LSM Detection ----------
-    const isLink = v => /^(https?:|magnet:)/i.test(v);
+    // ---------- Title Search & Kinogo/LSM Detection & Local Video ----------
+    const isLocalPath = v => {
+      if (!v) return false;
+      const s = v.trim();
+      if (/^(file:\/\/|\/|~\/|\.\.?\/)/i.test(s)) return true;
+      if (/\.(mp4|mkv|avi|webm|mov|ts|m4v|flv|wmv)(\?|$)/i.test(s)) return true;
+      return false;
+    };
+    const isLink = v => /^(https?:|magnet:)/i.test(v) || isLocalPath(v);
     const imdbId = v => { const m = v.match(/(?:imdb\.com\/title\/|^)(tt\d{6,10})/i); return m ? m[1].toLowerCase() : null; };
     let searchTimer = null, searchSeq = 0;
     const hideSearch = () => { $('searchResults').style.display = 'none'; $('searchResults').replaceChildren(); };
@@ -2040,19 +2253,92 @@
         return;
       }
       box.replaceChildren(...r.results.map((x, i) => {
+        const isLocal = Boolean(x.is_local);
         const thumb = x.image
           ? el('img', { class: 'sr-thumb', src: x.image, loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' })
-          : el('div', { class: 'sr-thumb', style: 'display:flex;align-items:center;justify-content:center;color:#64748b;font-size:1.5rem;', text: '🎬' });
+          : el('div', { class: 'sr-thumb', style: 'display:flex;align-items:center;justify-content:center;color:' + (isLocal ? '#38bdf8' : '#64748b') + ';font-size:1.5rem;', text: isLocal ? '💻' : '🎬' });
         const card = el('div', { class: 'sr-card' + (i === 0 ? ' first' : '') }, [
           thumb,
           el('div', { class: 'sr-body' }, [
             el('div', { class: 'sr-title', text: x.title + (x.year ? ' (' + x.year + ')' : '') }),
-            el('div', { class: 'sr-meta', text: (x.type ? x.type.toUpperCase() : '') + (x.cast ? ' · ' + x.cast : '') }),
+            el('div', { class: 'sr-meta', text: (isLocal ? 'НОУТБУК · ' : (x.type ? x.type.toUpperCase() + ' · ' : '')) + (x.cast || '') }),
           ])
         ]);
-        card.addEventListener('click', () => usePlayerLink(x.id));
+        card.addEventListener('click', () => {
+          if (isLocal) {
+            $('urlInput').value = x.path || x.id;
+            hideSearch();
+            lastInspected = '';
+            inspectInputUrl();
+          } else {
+            usePlayerLink(x.id);
+          }
+        });
         return card;
       }));
+    }
+
+    // ---------- Local File Browser Modal ----------
+    let currentBrowsePath = '';
+    async function openLocalFileModal(path) {
+      $('localModalBackdrop').style.display = 'flex';
+      await loadLocalDir(path || currentBrowsePath || '');
+    }
+    function closeLocalFileModal() {
+      $('localModalBackdrop').style.display = 'none';
+    }
+    async function loadLocalDir(path) {
+      const list = $('localFileList');
+      list.replaceChildren(el('div', { class: 'empty-state', style: 'padding: 24px;', text: 'Загрузка…' }));
+      try {
+        const res = await api('/api/local/browse?path=' + encodeURIComponent(path || ''));
+        if (!res.ok) {
+          list.replaceChildren(el('div', { class: 'empty-state', text: res.error || 'Ошибка открытия папки' }));
+          return;
+        }
+        currentBrowsePath = res.current;
+        $('localPathText').textContent = res.current;
+        $('localUpBtn').style.visibility = res.parent ? 'visible' : 'hidden';
+        $('localUpBtn').onclick = () => loadLocalDir(res.parent);
+
+        $('localQuickBar').replaceChildren(...(res.quick || []).map(q => {
+          const btn = el('button', { class: 'quick-chip', text: q.name });
+          btn.onclick = () => loadLocalDir(q.path);
+          return btn;
+        }));
+
+        const items = [];
+        for (const f of (res.folders || [])) {
+          const row = el('div', { class: 'file-item folder' }, [
+            el('span', { text: '📁' }),
+            el('span', { class: 'file-item-name', text: f.name })
+          ]);
+          row.onclick = () => loadLocalDir(f.path);
+          items.push(row);
+        }
+        for (const f of (res.files || [])) {
+          const row = el('div', { class: 'file-item video' }, [
+            el('span', { text: '🎬' }),
+            el('span', { class: 'file-item-name', text: f.name }),
+            el('span', { class: 'file-item-size', text: f.size })
+          ]);
+          row.onclick = () => {
+            $('urlInput').value = f.path;
+            closeLocalFileModal();
+            onInput();
+            inspectInputUrl();
+            toast('Выбран файл: ' + f.name);
+          };
+          items.push(row);
+        }
+        if (!items.length) {
+          list.replaceChildren(el('div', { class: 'empty-state', style: 'padding: 24px;', text: 'В этой папке нет видеофайлов' }));
+        } else {
+          list.replaceChildren(...items);
+        }
+      } catch (e) {
+        list.replaceChildren(el('div', { class: 'empty-state', text: 'Ошибка: ' + e }));
+      }
     }
 
     function onInput() {
@@ -2082,6 +2368,31 @@
     $('clearInputBtn').addEventListener('click', () => {
       $('urlInput').value = '';
       onInput();
+    });
+
+    $('browseLocalBtn').addEventListener('click', () => openLocalFileModal());
+    $('closeLocalModalBtn').addEventListener('click', closeLocalFileModal);
+    $('localModalBackdrop').addEventListener('click', e => {
+      if (e.target === $('localModalBackdrop')) closeLocalFileModal();
+    });
+    $('pickNativeFileBtn').addEventListener('click', () => $('nativeFileInput').click());
+    $('nativeFileInput').addEventListener('change', async e => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const res = await api('/api/local/find?name=' + encodeURIComponent(file.name));
+        if (res.ok && res.path) {
+          $('urlInput').value = res.path;
+          closeLocalFileModal();
+          onInput();
+          inspectInputUrl();
+          toast('Выбран файл: ' + file.name);
+        } else {
+          toast('Файл не найден в стандартных папках. Укажите путь вручную.');
+        }
+      } catch (err) {
+        toast('Ошибка поиска файла: ' + err);
+      }
     });
 
     // ---------- Event Bindings ----------
