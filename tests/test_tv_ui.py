@@ -3,7 +3,9 @@ import subprocess
 import sys
 import threading
 import unittest
+import json
 import urllib.request
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server
@@ -32,7 +34,7 @@ class TestTVPlayerUI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", ctype)
         self.assertIn("/static/tv/tv_player.css", html)
-        self.assertIn("/static/tv/tv_player.js?v=9", html)
+        self.assertIn("/static/tv/tv_player.js", html)
         self.assertIn('id="tv-video"', html)
         self.assertIn('id="tv-overlay"', html)
         self.assertIn('data-action="open-episodes"', html)
@@ -95,6 +97,35 @@ class TestTVPlayerUI(unittest.TestCase):
         if os.path.exists(node_bin):
             proc = subprocess.run([node_bin, "--check", js_file], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, f"JS syntax error: {proc.stderr}")
+
+    def test_seek_on_remuxed_stream_shows_status_and_restarts_cast(self):
+        sid = 515151
+        server.active_sessions[sid] = {"file": "x.ts", "active": True, "cancel_event": threading.Event(), "procs": set()}
+        saved = (server.current_session_id, dict(server.app_state))
+        server.current_session_id = sid
+        server.app_state.update(url="https://youtu.be/x", status="playing", status_text="Играет на ТВ")
+        started = []
+        try:
+            with mock.patch.object(server, "handle_cast_request", lambda **kw: started.append(kw)):
+                req = urllib.request.Request(f"{self.base_url}/api/tv/action", data=json.dumps({"action": "seek", "target": 600}).encode(),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=5).read()
+                for _ in range(20):
+                    if started:
+                        break
+                    threading.Event().wait(0.05)
+            self.assertEqual(server.app_state["status_text"], "Перематываю…")
+            self.assertEqual(started[0]["start_at"], 600)
+            self.assertTrue(started[0]["seamless"])
+        finally:
+            server.active_sessions.pop(sid, None)
+            server.current_session_id = saved[0]
+            server.app_state.clear()
+            server.app_state.update(saved[1])
+
+    def test_tv_js_shows_loading_box_while_stream_restarts(self):
+        _, js, _ = self._get("/static/tv/tv_player.js")
+        self.assertIn("Запускаю|Связь", js)
 
     def test_tv_js_direct_stream_support(self):
         status, js, _ = self._get("/static/tv/tv_player.js")

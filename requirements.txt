@@ -1,0 +1,2 @@
+# only needed for liveball.* links (headless Chrome finds the tokenised stream)
+playwright

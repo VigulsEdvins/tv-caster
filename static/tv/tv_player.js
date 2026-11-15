@@ -203,6 +203,7 @@
     if (!sid) return;
     if (currentSessionId !== sid) {
       directProxyFallbackUsed = false;
+      knownDuration = 0;
     }
     currentSessionId = sid;
     const isDirect = Boolean(stateObj.direct_stream);
@@ -326,16 +327,22 @@
     if (!currentSessionId) return 0;
     const isDirect = Boolean(serverState && serverState.direct_stream);
     const spdFactor = isDirect ? 1.0 : currentSpeed;
-    const srvDur = Math.max(knownDuration, Number(serverState.duration || 0));
-    if (srvDur > 0 && srvDur < 43200) return srvDur;
     if (hasNativeBridge) {
       const d = Number(window.AndroidBridge.getDuration() || 0);
-      if (d > 0 && d < 43200) return baseSeekOffset + d * spdFactor;
+      if (d > 0 && d < 43200) {
+        knownDuration = baseSeekOffset + d * spdFactor;
+        return knownDuration;
+      }
     } else {
       const d = Number(videoEl.duration || 0);
-      if (isFinite(d) && d > 0 && d < 43200) return baseSeekOffset + d * spdFactor;
+      if (isFinite(d) && d > 0 && d < 43200) {
+        knownDuration = baseSeekOffset + d * spdFactor;
+        return knownDuration;
+      }
     }
-    return srvDur;
+    const srvDur = Math.max(knownDuration, Number(serverState.duration || 0));
+    if (srvDur > 0 && srvDur < 43200) return srvDur;
+    return 0;
   }
 
   function playerSeekTo(targetSec, fromRemote) {
@@ -357,7 +364,8 @@
         if (nativeDur > 0 && currentSpeed === 1.0 && targetSec >= baseSeekOffset && !serverState.is_active_download) {
           window.AndroidBridge.seekTo(Math.max(0, relTarget));
           pendingSeekTarget = null;
-        } else if (fromRemote) {
+        } else {
+          // cannot seek inside the growing/partial stream: ask the server to restart it at the target, whoever asked
           postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
         }
       }
@@ -382,7 +390,8 @@
         if (canSeekInBuffer) {
           videoEl.currentTime = relTarget;
           pendingSeekTarget = null;
-        } else if (fromRemote) {
+        } else {
+          // cannot seek inside the growing/partial stream: ask the server to restart it at the target, whoever asked
           postAction({ action: "seek", target: Math.floor(targetSec), from_tv: true });
         }
       }
@@ -447,7 +456,7 @@
   function applyServerState(data) {
     if (!data) return;
     serverState = data;
-    if (data.duration && data.duration > 0) {
+    if (data.duration && data.duration > 0 && knownDuration === 0) {
       knownDuration = data.duration;
     }
 
@@ -526,7 +535,13 @@
       standbyTitle.textContent = data.error || "Ошибка воспроизведения";
       standbySubtitle.textContent = data.error_hint || "Попробуйте выбрать другое качество или озвучку.";
       loadingBox.classList.remove("active");
-    } else if (data.status === "playing" || data.status === "paused") {
+    } else if (currentSessionId && (data.status === "preparing" || (data.status === "downloading" && /Запускаю|Связь/.test(data.status_text || "")))) {
+      // seek / reconnect restarts the stream while the old picture is still on screen: say so instead of looking frozen
+      loadingBox.classList.add("active");
+      loadingStatusText.textContent = data.status_text || "Загрузка…";
+      loadingSpeedText.textContent = "";
+      loadingBarFill.style.width = "40%";
+    } else if (data.status === "playing" || data.status === "paused" || data.status === "downloading") {
       loadingBox.classList.remove("active");
     }
 
@@ -551,6 +566,7 @@
         playerSetSpeed(cmd.target || "1.0x");
       } else if (cmd.type === "stop") {
         currentSessionId = 0;
+        knownDuration = 0;
         if (hasNativeBridge) {
           window.AndroidBridge.stop();
         } else {

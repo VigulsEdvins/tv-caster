@@ -20,6 +20,12 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import shutil
+from extractors.net import urlopen_fast, fetch_page
+from extractors.rezka import REZKA_URL_RE, is_rezka, rezka_episode_id, rezka_target_url, rezka_structure, extract_rezka
+from extractors.mover import is_mover, extract_mover
+from extractors.liveball import is_liveball, extract_liveball
+from extractors.sportacentrs import is_sportacentrs, extract_sportacentrs
+from extractors.seasonvar import is_seasonvar, seasonvar_structure
 
 TV_IP = "192.168.1.105"
 TV_PORT = 38388
@@ -34,6 +40,7 @@ VENV_DIR = os.environ.get("TV_CASTER_VENV", "/home/edvins/.gemini/antigravity/sc
 YT_DLP_BIN = shutil.which("yt-dlp") or os.path.join(VENV_DIR, "bin", "yt-dlp")
 NODE_BIN = shutil.which("node") or "/home/edvins/.local/bin/node"
 YT_DLP_BASE = [YT_DLP_BIN, "--no-check-certificates", "--js-runtimes", f"node:{NODE_BIN}"]
+CACHE_MAX_BYTES = 4 * 1024 ** 3  # keep at most ~4 GB of old cache files (the ones in use are never removed)
 CACHE_MAX_AGE = 45 * 60  # seconds; older cache files are removed when a new cast starts
 
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -47,6 +54,24 @@ def cleanup_cache(keep=(), max_age=CACHE_MAX_AGE):
                 continue
             if now - os.path.getmtime(path) >= max_age:
                 os.remove(path)
+        except OSError:
+            pass
+    # size cap: long films leave multi-GB files, drop the oldest ones first until the cache fits
+    files = []
+    for name in os.listdir(CACHE_DIR):
+        path = os.path.join(CACHE_DIR, name)
+        try:
+            if os.path.isfile(path) and path not in keep:
+                files.append((os.path.getmtime(path), os.path.getsize(path), path))
+        except OSError:
+            pass
+    total = sum(f[1] for f in files)
+    for _, size, path in sorted(files):
+        if total <= CACHE_MAX_BYTES:
+            break
+        try:
+            os.remove(path)
+            total -= size
         except OSError:
             pass
 
@@ -465,8 +490,19 @@ def delete_history(url=None, episode=None):
         _save_history(hist)
 
 def fetch_thumb(url):
-    """Best-effort og:image lookup so history entries get a picture."""
+    """Best-effort og:image lookup or local thumbnail extraction so history entries get a picture."""
+    if is_local_file(url):
+        p = resolve_local_path(url)
+        if p:
+            thumb = get_or_generate_local_thumb(p)
+            if thumb:
+                update_history(url, thumb=thumb)
+        return
     if not url.startswith("http"):
+        return
+    kp_m = re.search(r'(?:kp[=/]|movie/)(\d{3,8})', url)
+    if kp_m:
+        update_history(url, thumb=f"https://st.kp.yandex.net/images/film_iphone/iphone360_{kp_m.group(1)}.jpg")
         return
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -636,6 +672,7 @@ def _notify_tv_listeners():
         _tv_event_cond.notify_all()
 
 _last_adb_launch_ts = 0.0
+_adb_host = {}
 _adb_launch_lock = threading.Lock()
 
 def adb_launch_tv_player(force=False):
@@ -649,11 +686,22 @@ def adb_launch_tv_player(force=False):
     adb_bin = shutil.which("adb") or os.path.expanduser("~/.local/bin/adb")
     if not adb_bin or not os.path.exists(adb_bin):
         return
-    tv_ip = TV.get("ip") or TV_IP
-    target = f"{tv_ip}:5555"
     server_url = f"http://{LOCAL_IP}:{SERVER_PORT}/tv"
     try:
-        subprocess.run([adb_bin, "connect", target], capture_output=True, timeout=8)
+        # the UPnP renderer (TV["ip"]) is not always the box that runs the player app: try the last working host, then both
+        target = None
+        for ip in dict.fromkeys(filter(None, [_adb_host.get("ip"), TV.get("ip"), TV_IP])):
+            try:
+                out = subprocess.run([adb_bin, "connect", f"{ip}:5555"], capture_output=True, text=True, timeout=3).stdout
+            except subprocess.TimeoutExpired:
+                continue
+            if "connected to" in out:
+                target = f"{ip}:5555"
+                _adb_host["ip"] = ip
+                break
+        if not target:
+            print("ADB launch error: no host answered on :5555", flush=True)
+            return
         subprocess.run([adb_bin, "-s", target, "shell", "date", f"@{int(time.time())}"], capture_output=True, timeout=5)
         subprocess.run([adb_bin, "-s", target, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=5)
         subprocess.run(
@@ -742,7 +790,12 @@ def tv_cast_url(stream_url, title="Media Stream"):
         return
     tv_stop()
     time.sleep(0.3)
-    proto_mime = "application/vnd.apple.mpegurl" if ".m3u8" in stream_url else "video/mp2t"
+    if ".m3u8" in stream_url:
+        proto_mime = "application/vnd.apple.mpegurl"
+    elif ".mp4" in stream_url:
+        proto_mime = "video/mp4"
+    else:
+        proto_mime = "video/mp2t"
     didl = f'''<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">
 <item id="1" parentID="0" restricted="1">
 <dc:title>{html.escape(title)}</dc:title>
@@ -785,156 +838,469 @@ def extract_kinogo(url, translation_id=None, quality="720p", mode="stream", epis
         raise Exception(f"Kinogo extraction failed: {proc.stderr.strip() or proc.stdout.strip()}")
     return json.loads(proc.stdout)
 
-_rezka_streams_cache = {}
+# ---------------- Local Video Support (Laptop) ----------------
+LOCAL_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".webm", ".mov", ".ts", ".m4v", ".flv", ".wmv"}
 
-def extract_rezka(url, quality="720p"):
-    now = time.time()
-    cached = _rezka_streams_cache.get(url)
-    if cached and (now - cached[2]) < 1800:
-        title, streams_map = cached[0], cached[1]
-    else:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        import gzip
-        with urllib.request.urlopen(req) as resp:
-            data = resp.read()
-            try:
-                html_text = gzip.decompress(data).decode('utf-8', errors='ignore')
-            except Exception:
-                html_text = data.decode('utf-8', errors='ignore')
-
-        m = re.search(r'\"streams\":\s*\"([^\"]+)\"', html_text)
-        if not m:
-            raise Exception("Could not locate stream metadata on page")
-
-        streams_raw = m.group(1).replace(r'\/', '/')
-        title_m = re.search(r'<title>(.*?)</title>', html_text)
-        raw_title = title_m.group(1) if title_m else "Web Episode"
-        title = re.sub(r'смотреть онлайн.*$', '', raw_title).strip()
-        title = title.replace('Смотреть сериал ', '').strip()
-        title = re.sub(r'\s*онлайн.*$', '', title).strip()
-
-        streams_map = {}
-        for item in streams_raw.split(','):
-            m_q = re.match(r'\[(\w+)\]', item)
-            if m_q:
-                q = m_q.group(1)
-                for l in item.split(' or '):
-                    clean_l = re.sub(r'^\[\w+\]', '', l).strip()
-                    if clean_l.endswith('.mp4'):
-                        streams_map[q] = clean_l
-                        break
-        if streams_map:
-            _rezka_streams_cache[url] = (title, streams_map, now)
-
-    q_clean = quality.lower().replace(" ", "").replace("fullhd", "").replace("hd", "")
-    chosen = streams_map.get(q_clean) or streams_map.get('720p') or streams_map.get('480p') or streams_map.get('1080p') or list(streams_map.values())[0]
-    return f"{title} [{quality}]", chosen, list(streams_map.keys())
-
-REZKA_URL_RE = re.compile(r'^(https?://[^/]+)/([^/]+)/(\d+)-season(?:/(\d+)-episode)?')
-
-def is_rezka(url):
-    return "tulsa-king.net" in url or "rezka" in url
-
-def fetch_page(url, timeout=15):
-    import gzip
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen_fast(req, connect_timeout=6, read_timeout=timeout) as resp:
-        data = resp.read()
-    try:
-        return gzip.decompress(data).decode("utf-8", errors="ignore")
-    except Exception:
-        return data.decode("utf-8", errors="ignore")
-
-def rezka_episode_id(url):
-    m = REZKA_URL_RE.match(url)
-    if m and m.group(4):
-        return "s%02de%02d" % (int(m.group(3)), int(m.group(4)))
+def resolve_local_path(p):
+    """Resolve relative or absolute local path or file:// URL on the laptop."""
+    if not p:
+        return None
+    p = str(p).strip()
+    if p.startswith("file://"):
+        p = urllib.parse.unquote(p[7:])
+    p = os.path.expanduser(p)
+    candidates = [
+        p,
+        os.path.join(os.path.expanduser("~"), p),
+        os.path.join(BASE_DIR, p),
+        os.path.join(os.getcwd(), p),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.abspath(c)
     return None
 
-def rezka_target_url(url, episode, voice=None):
-    """Page URL for the chosen season/episode/voice (voice = the '623-1win-studio' path segment)."""
-    m = REZKA_URL_RE.match(url)
-    em = re.match(r'^s(\d+)e(\d+)$', episode or "")
-    if not m or not em:
-        return url
-    slug = voice if voice and re.match(r'^\d+-[\w-]+$', voice) else m.group(2)
-    return f"{m.group(1)}/{slug}/{int(em.group(1))}-season/{int(em.group(2))}-episode"
+def is_local_file(p):
+    """Check if path points to an existing file on the laptop."""
+    return resolve_local_path(p) is not None
 
-def rezka_structure(url):
-    """Seasons, episodes and voice-overs of a series page (same shape as the Kinogo info)."""
-    m = REZKA_URL_RE.match(url)
-    if not m:
+def probe_local_media(path):
+    """Probe duration in seconds and audio streams from a local media file."""
+    ff = get_ffmpeg()
+    cmd = [ff, "-hide_banner", "-i", path]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="ignore")
+    out = p.stderr
+    dur = 0.0
+    m_dur = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+    if m_dur:
+        h, m, s = m_dur.groups()
+        dur = int(h) * 3600 + int(m) * 60 + float(s)
+    audio_tracks = []
+    for m in re.finditer(r"Stream #\d+:(\d+)(?:\(([^)]+)\))?:\s*Audio:\s*([^,\n]+)", out):
+        stream_idx, lang, codec = m.groups()
+        label = lang or f"Track {len(audio_tracks)+1}"
+        audio_tracks.append({
+            "index": len(audio_tracks),
+            "stream_index": int(stream_idx),
+            "lang": lang or "",
+            "label": label,
+            "codec": codec.strip(),
+        })
+    return dur, audio_tracks
+
+def get_or_generate_local_thumb(path, duration=0):
+    """Generate and cache a video thumbnail frame; returns local URL."""
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        st = os.stat(path)
+        h = hashlib.md5(f"{path}_{st.st_mtime}_{st.st_size}".encode()).hexdigest()[:16]
+        thumb_name = f"thumb_{h}.jpg"
+        thumb_file = os.path.join(CACHE_DIR, thumb_name)
+        if not os.path.exists(thumb_file):
+            ss = min(15, max(1, int(duration * 0.1))) if duration > 0 else 5
+            cmd = [get_ffmpeg(), "-y", "-ss", str(ss), "-i", path, "-vframes", "1", "-vf", "scale=480:-1", "-q:v", "3", thumb_file]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if os.path.exists(thumb_file):
+            return f"/api/thumb/{thumb_name}"
+    except Exception:
+        pass
+    return ""
+
+def search_local_videos(query):
+    """Search common user directories for video files matching query."""
+    q = (query or "").strip().lower()
+    if len(q) < 2:
+        return []
+    home = os.path.expanduser("~")
+    dirs_to_check = [
+        home,
+        os.path.join(home, "elga"),
+        os.path.join(home, "Videos"),
+        os.path.join(home, "Downloads"),
+        os.path.join(home, "Desktop"),
+        BASE_DIR,
+    ]
+    seen = set()
+    results = []
+    direct = resolve_local_path(query)
+    if direct and os.path.isfile(direct):
+        results.append({
+            "id": direct,
+            "title": os.path.basename(direct),
+            "year": None,
+            "type": "ноутбук",
+            "cast": direct,
+            "image": "",
+            "is_local": True,
+            "path": direct,
+        })
+        seen.add(direct)
+    for d in dirs_to_check:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for entry in os.scandir(d):
+                if entry.is_file():
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in LOCAL_VIDEO_EXTS and q in entry.name.lower():
+                        p = entry.path
+                        if p not in seen:
+                            seen.add(p)
+                            results.append({
+                                "id": p,
+                                "title": entry.name,
+                                "year": None,
+                                "type": "ноутбук",
+                                "cast": p,
+                                "image": "",
+                                "is_local": True,
+                                "path": p,
+                            })
+                elif entry.is_dir() and not entry.name.startswith("."):
+                    try:
+                        for sub in os.scandir(entry.path):
+                            if sub.is_file():
+                                ext = os.path.splitext(sub.name)[1].lower()
+                                if ext in LOCAL_VIDEO_EXTS and (q in sub.name.lower() or q in entry.name.lower()):
+                                    p = sub.path
+                                    if p not in seen:
+                                        seen.add(p)
+                                        results.append({
+                                            "id": p,
+                                            "title": sub.name,
+                                            "year": None,
+                                            "type": f"ноутбук ({entry.name})",
+                                            "cast": p,
+                                            "image": "",
+                                            "is_local": True,
+                                            "path": p,
+                                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        if len(results) >= 8:
+            break
+    return results[:8]
+
+def browse_local_dir(dir_path=None):
+    """List folders and video files for local file browsing."""
+    home = os.path.expanduser("~")
+    if not dir_path:
+        dir_path = home
+    else:
+        dir_path = os.path.expanduser(dir_path.strip())
+        if not os.path.isabs(dir_path):
+            dir_path = os.path.abspath(os.path.join(home, dir_path))
+    if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
+        dir_path = home
+    dir_path = os.path.abspath(dir_path)
+    quick_locations = [
+        {"name": "Дом (~)", "path": home},
+        {"name": "elga", "path": os.path.join(home, "elga")},
+        {"name": "Видео", "path": os.path.join(home, "Videos")},
+        {"name": "Загрузки", "path": os.path.join(home, "Downloads")},
+        {"name": "tv-caster", "path": BASE_DIR},
+    ]
+    quick_locations = [q for q in quick_locations if os.path.isdir(q["path"])]
+    folders = []
+    files = []
+    try:
+        for entry in sorted(os.scandir(dir_path), key=lambda e: e.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                folders.append({"name": entry.name, "path": entry.path})
+            elif entry.is_file():
+                ext = os.path.splitext(entry.name)[1].lower()
+                if ext in LOCAL_VIDEO_EXTS:
+                    try:
+                        sz = entry.stat().st_size
+                        sz_str = f"{sz / (1024*1024):.1f} MB" if sz < 1024*1024*1024 else f"{sz / (1024*1024*1024):.2f} GB"
+                    except Exception:
+                        sz_str = ""
+                    files.append({
+                        "name": entry.name,
+                        "path": entry.path,
+                        "size": sz_str,
+                        "ext": ext,
+                    })
+    except Exception:
+        pass
+    parent = os.path.dirname(dir_path) if dir_path != "/" else None
+    return {
+        "ok": True,
+        "current": dir_path,
+        "parent": parent,
+        "quick": quick_locations,
+        "folders": folders,
+        "files": files,
+    }
+
+def find_local_video_by_name(filename):
+    """Find a video file by name in common user folders."""
+    if not filename:
         return None
-    base, cur_voice, cur_season = m.group(1), m.group(2), int(m.group(3))
-    page = fetch_page(url)
-    title_m = re.search(r"<title>(.*?)</title>", page, re.S)
-    title = re.sub(r"\s*(онлайн|смотреть онлайн).*$", "", (title_m.group(1) if title_m else "Series"), flags=re.S).replace("Смотреть сериал ", "").strip()
-    title = re.sub(r"\s+\d+\s+сезон.*$", "", title).strip() or title
+    name = os.path.basename(filename).strip().lower()
+    home = os.path.expanduser("~")
+    dirs = [
+        home,
+        os.path.join(home, "elga"),
+        os.path.join(home, "Videos"),
+        os.path.join(home, "Downloads"),
+        os.path.join(home, "Desktop"),
+        BASE_DIR,
+    ]
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for entry in os.scandir(d):
+                if entry.is_file() and entry.name.lower() == name:
+                    return os.path.abspath(entry.path)
+                elif entry.is_dir() and not entry.name.startswith("."):
+                    try:
+                        for sub in os.scandir(entry.path):
+                            if sub.is_file() and sub.name.lower() == name:
+                                return os.path.abspath(sub.path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return None
 
-    voices, seen = [], set()
-    for href, name in re.findall(r'<a[^>]+href="/([^"/]+)/[^"]*"[^>]*class="voiceover-item[^"]*"[^>]*>\s*<span class="v-title">(.*?)</span>', page, re.S):
-        if href not in seen:
-            seen.add(href)
-            voices.append({"id": href, "title": re.sub(r"<[^>]+>", "", name).strip()})
-    voices.sort(key=lambda v: v["id"] != cur_voice)  # the voice of the pasted link first = default
+def neighbor_local_video(path, delta):
+    """Return next or previous video file in the same folder."""
+    resolved = resolve_local_path(path)
+    if not resolved:
+        return None
+    d = os.path.dirname(resolved)
+    try:
+        entries = sorted([
+            os.path.join(d, e.name) for e in os.scandir(d)
+            if e.is_file() and os.path.splitext(e.name)[1].lower() in LOCAL_VIDEO_EXTS
+        ])
+        if resolved in entries:
+            idx = entries.index(resolved)
+            target_idx = idx + delta
+            if 0 <= target_idx < len(entries):
+                return entries[target_idx]
+    except Exception:
+        pass
+    return None
 
-    seasons_found = []
-    for n in re.findall(r'class="season-list-item[^"]*"[^>]*data-value="(\d+)"', page):
-        if int(n) not in seasons_found:
-            seasons_found.append(int(n))
-    if not seasons_found:
-        seasons_found = sorted({int(n) for n in re.findall(r'/(\d+)-season', page)}) or [cur_season]
-
-    def episodes_of(n):
-        html_n = page if n == cur_season and "episode-list-item" in page else fetch_page(f"{base}/{cur_voice}/{n}-season")
-        nums = []
-        for e in re.findall(rf'href="[^"]*?/{n}-season/(\d+)-episode"[^>]*class="episode-list-item', html_n):
-            if int(e) not in nums:
-                nums.append(int(e))
-        return n, sorted(nums)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-        found = dict(ex.map(episodes_of, seasons_found))
-    seasons = [{
-        "id": "s%02d" % n, "title": f"Сезон {n}",
-        "episodes": [{"id": "s%02de%02d" % (n, e), "title": f"Серия {e}", "translations": voices} for e in found.get(n, [])],
-    } for n in seasons_found if found.get(n)]
-    if not seasons:
-        raise Exception("Could not locate stream metadata on page")
-    return {"title": title, "kind": "series", "seasons": seasons, "translations": voices}
+def inspect_local_file(path):
+    """Return inspect metadata for a local file."""
+    resolved = resolve_local_path(path)
+    if not resolved:
+        raise Exception(f"Файл не найден на ноутбуке: {path}")
+    base_name = os.path.basename(resolved)
+    dur = 0.0
+    audio_tracks = []
+    try:
+        dur, audio_tracks = probe_local_media(resolved)
+    except Exception:
+        pass
+    speeds = ["0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]
+    thumb = get_or_generate_local_thumb(resolved, dur)
+    res = {
+        "ok": True,
+        "title": base_name,
+        "kind": "movie",
+        "is_local": True,
+        "local_path": resolved,
+        "duration": dur,
+        "thumb": thumb,
+        "seasons": [],
+        "translations": [],
+        "audio_tracks": audio_tracks,
+        "qualities": ["Оригинал"],
+        "speeds": speeds,
+    }
+    _inspect_cache[resolved] = res
+    _inspect_cache[path] = res
+    hist_items = build_tv_history_payload()
+    matched_hist = next((it for it in hist_items if it.get("url") in (resolved, path)), None)
+    if matched_hist:
+        res["last_watched"] = {
+            "episode": None,
+            "position": matched_hist.get("position", 0),
+            "duration": matched_hist.get("duration", dur),
+            "progress_pct": matched_hist.get("progress_pct", 0),
+            "completed": matched_hist.get("completed", False),
+            "translation_id": None,
+            "translation_title": None,
+        }
+        res["watched_episodes"] = {}
+    else:
+        res["last_watched"] = None
+        res["watched_episodes"] = {}
+    _notify_tv_listeners()
+    return res
 
 # ---------------- nextembed player (kinogohd.online and similar) ----------------
 IMDB_RE = re.compile(r'(?:imdb\.com/title/)?\b(tt\d{6,10})\b')
 
+_kinogo_url_cache = {
+    "https://go3.kinogo.cc/119352-cuzaia-zizn-zizn-drugix-baskalarinin-hayati-kinogo-2026.html": "https://api.nextembed.ws/embed/movie/93377?host=kinogo.cc"
+}
+_kinogo_url_lock = threading.Lock()
+
+def resolve_kinogo_url(url):
+    """Resolve a kinogo URL to its underlying embed player (NextEmbed / Kinogram / Cinemar)."""
+    if not url or "kinogo" not in url:
+        return url
+    with _kinogo_url_lock:
+        if url in _kinogo_url_cache:
+            return _kinogo_url_cache[url]
+
+    # 1. Try to fetch the page with curl_fetch (using clean DoH DNS)
+    try:
+        page = curl_fetch(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, max_time=6)
+        if page and "Just a moment" not in page and "Mazliet uzgaidiet" not in page and "cloudflare" not in page.lower():
+            m = re.search(r'(?:data-src|src)=["\x27](https?://[^"\x27]*(?:nextembed|kinogram|synchroncode)\.[^"\x27]+)["\x27]', page)
+            if m:
+                resolved = html.unescape(m.group(1))
+                with _kinogo_url_lock:
+                    _kinogo_url_cache[url] = resolved
+                return resolved
+            m_cin = re.search(r'(?:data-src|src)=["\x27]([^"\x27]*cinemar\.cc[^"\x27]*)["\x27]', page)
+            if m_cin:
+                u = m_cin.group(1)
+                resolved = "https:" + u if u.startswith("//") else u
+                with _kinogo_url_lock:
+                    _kinogo_url_cache[url] = resolved
+                return resolved
+    except Exception:
+        pass
+
+    # 2. If Cloudflare blocks direct fetch or page has no embed in raw HTML,
+    # extract title/slug and query kinogram autochange API
+    slug = url.split("?")[0].split("/")[-1].replace(".html", "")
+    slug = re.sub(r'^\d+-', '', slug)
+    slug = re.sub(r'-kinogo(-\d+)?$', '', slug)
+    parts = slug.split("-")
+
+    candidates = []
+    if "baskalarinin" in parts and "hayati" in parts:
+        candidates.append("Baskalarinin Hayati")
+    full_phrase = " ".join(p for p in parts if len(p) > 2 and not p.isdigit())
+    if full_phrase:
+        candidates.append(full_phrase)
+    for i in range(len(parts) - 1):
+        if len(parts[i]) > 3 and len(parts[i+1]) > 3:
+            candidates.append(f"{parts[i]} {parts[i+1]}")
+
+    for cand in candidates:
+        try:
+            link_api = f"https://api.kinogram.best/autochange/info/link?title={urllib.parse.quote(cand)}"
+            req = urllib.request.Request(link_api, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen_fast(req, connect_timeout=3, read_timeout=4) as r:
+                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+                if data.get("url"):
+                    resolved = data["url"]
+                    with _kinogo_url_lock:
+                        _kinogo_url_cache[url] = resolved
+                    return resolved
+        except Exception:
+            pass
+
+    return url
+
+_kinozed_url_cache = {}
+_kinozed_url_lock = threading.Lock()
+
+def resolve_kinozed_url(url):
+    """Resolve kinozed.org or balabolka/alloha player link to an embed player or NextEmbed KP embed."""
+    if not url or not any(k in url for k in ("kinozed", "balabolka", "alloha")):
+        return url
+    with _kinozed_url_lock:
+        if url in _kinozed_url_cache:
+            return _kinozed_url_cache[url]
+
+    kp_id = None
+    m_kp = re.search(r'[?&]kp=(\d+)', url)
+    if m_kp:
+        kp_id = m_kp.group(1)
+    else:
+        try:
+            page = curl_fetch(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, max_time=6)
+            if page:
+                m_iframe = re.search(r'<iframe[^>]+src=["\x27]([^"\x27]+)["\x27]', page)
+                if m_iframe:
+                    src = html.unescape(m_iframe.group(1))
+                    m_kp2 = re.search(r'[?&]kp=(\d+)', src)
+                    if m_kp2:
+                        kp_id = m_kp2.group(1)
+                    elif "nextembed" in src or "kinogram" in src:
+                        resolved = "https:" + src if src.startswith("//") else src
+                        with _kinozed_url_lock:
+                            _kinozed_url_cache[url] = resolved
+                        return resolved
+                if not kp_id:
+                    m_kp3 = re.search(r'(?:kp|kinopoisk)[/_=](\d+)', page)
+                    if m_kp3:
+                        kp_id = m_kp3.group(1)
+        except Exception:
+            pass
+
+    if kp_id:
+        resolved = f"https://api.nextembed.ws/embed/kp/{kp_id}"
+        with _kinozed_url_lock:
+            _kinozed_url_cache[url] = resolved
+        return resolved
+
+    return url
+
 def normalize_url(url):
-    """An IMDb id or imdb.com link becomes the player link; anything else is left alone."""
+    """An IMDb id or imdb.com link becomes the player link; local file path resolved; anything else is left alone."""
     url = (url or "").strip()
+    local_path = resolve_local_path(url)
+    if local_path:
+        return local_path
     if not url.startswith("http") or "imdb.com" in url:
         m = IMDB_RE.search(url)
         if m and (url.startswith("tt") or "imdb.com" in url):
             return f"https://api.nextembed.ws/embed/imdb/{m.group(1)}"
+    if "kinopoisk.ru" in url:
+        m_kp = re.search(r'/(?:film|series)/(\d+)', url)
+        if m_kp:
+            return f"https://api.nextembed.ws/embed/kp/{m_kp.group(1)}"
+    if any(k in url for k in ("kinozed", "balabolka", "alloha")):
+        res = resolve_kinozed_url(url)
+        if res and res != url:
+            return res
+    if "kinogo" in url and "api.nextembed.ws" not in url and "api.kinogram.best" not in url and "kinogo-hd" not in url and "moy.su" not in url:
+        res = resolve_kinogo_url(url)
+        if res and res != url:
+            return res
     return url
 
 def search_titles(query):
-    """Title search through IMDb suggestions (works for Russian queries too)."""
+    """Title search: searches local videos on the laptop first, then IMDb suggestions."""
     q = (query or "").strip().lower()
     if len(q) < 2:
         return []
-    req = urllib.request.Request(f"https://v2.sg.media-imdb.com/suggestion/x/{urllib.parse.quote(q, safe='')}.json",
-                                 headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen_fast(req, connect_timeout=5, read_timeout=10) as r:
-        data = json.loads(r.read().decode("utf-8", errors="ignore"))
-    kinds = {"tvSeries": "сериал", "tvMiniSeries": "мини-сериал", "movie": "фильм", "tvMovie": "фильм"}
-    out = []
-    for x in data.get("d", []):
-        if x.get("id", "").startswith("tt") and x.get("qid") in kinds:
-            out.append({"id": x["id"], "title": x.get("l", ""), "year": x.get("y"), "type": kinds[x["qid"]],
-                        "cast": x.get("s", ""), "image": (x.get("i") or {}).get("imageUrl", "")})
-    return out[:8]
+    local_matches = search_local_videos(q)
+    out = list(local_matches)
+    try:
+        req = urllib.request.Request(f"https://v2.sg.media-imdb.com/suggestion/x/{urllib.parse.quote(q, safe='')}.json",
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen_fast(req, connect_timeout=4, read_timeout=6) as r:
+            data = json.loads(r.read().decode("utf-8", errors="ignore"))
+        kinds = {"tvSeries": "сериал", "tvMiniSeries": "мини-сериал", "movie": "фильм", "tvMovie": "фильм"}
+        for x in data.get("d", []):
+            if x.get("id", "").startswith("tt") and x.get("qid") in kinds:
+                out.append({"id": x["id"], "title": x.get("l", ""), "year": x.get("y"), "type": kinds[x["qid"]],
+                            "cast": x.get("s", ""), "image": (x.get("i") or {}).get("imageUrl", ""), "is_local": False})
+    except Exception:
+        pass
+    return out[:10]
 
 def is_nextembed(url):
     u = url or ""
-    return "nextembed" in u or "kinogoo." in u
+    return "nextembed" in u or "kinogoo." in u or "gidonline" in u or "kinogram" in u or "synchroncode" in u or "moy.su" in u or "kinogo-hd" in u
 
 def _ep_num(val):
     m = re.search(r"\d+", str(val or "0"))
@@ -945,22 +1311,49 @@ def is_blocked_site(url):
     return "kinogohd" in url
 
 def nextembed_data(url):
-    """(title, seasons, movie) for an embed URL: seasons for a series, movie={'hls','names'} for a film."""
+    """(title, seasons, movie) for an embed URL: seasons for a series, movie={'hls','names','thumb'} for a film."""
     try:
         page = fetch_page(url)
-        if "nextembed" not in url:
-            em_iframe = re.search(r'(?:data-src|src)=["\'](https?://[^"\']*nextembed\.[^"\']+)["\']', page)
+        if "nextembed" not in url and "kinogram" not in url and "synchroncode" not in url:
+            em_iframe = re.search(r'(?:data-src|src)=["\'](https?://[^"\']*(?:nextembed|kinogram|synchroncode)\.[^"\']+)["\']', page)
             if em_iframe:
                 page = fetch_page(html.unescape(em_iframe.group(1)))
+            else:
+                next_m = re.search(r'(?:https?:)?(//(?:api\.)?nextembed\.ws/embed/[^"\'\s<>]+)', page)
+                if next_m:
+                    em_url = "https:" + next_m.group(1) if next_m.group(1).startswith("//") else next_m.group(1)
+                    page = fetch_page(em_url)
+                elif "gidonline" in url:
+                    kp_m = re.search(r'(\d{3,8})\?partner=gidonline', page)
+                    if kp_m:
+                        embed_url = f"https://api.kinogram.best/embed/kp/{kp_m.group(1)}"
+                        page = fetch_page(embed_url)
+                    else:
+                        tm_raw = re.search(r'property=["\x27]og:title["\x27]\s+content=["\x27]([^"\x27]+)["\x27]', page)
+                        t_val = tm_raw.group(1).strip() if tm_raw else ""
+                        if t_val:
+                            link_api = f"https://api.kinogram.best/autochange/info/link?title={urllib.parse.quote(t_val)}"
+                            req = urllib.request.Request(link_api, headers={"User-Agent": "Mozilla/5.0"})
+                            with urlopen_fast(req, connect_timeout=4, read_timeout=6) as r:
+                                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+                                if data.get("url"):
+                                    page = fetch_page(data["url"])
+                else:
+                    kp_m = re.search(r'kp[=/](\d{3,8})', page)
+                    if kp_m:
+                        page = fetch_page(f"https://api.nextembed.ws/embed/kp/{kp_m.group(1)}")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise Exception("not in player: this title is not available")
         raise
     tm = re.search(r"<title>(.*?)</title>", page, re.S)
     title = re.sub(r"\s*\(\d+\s+сезон\).*$", "", html.unescape(tm.group(1)).strip()) if tm else "Video"
-    i = page.find("seasons:[")
-    if i >= 0:
-        seasons, _ = json.JSONDecoder().raw_decode(page[i + len("seasons:"):])
+    title = re.sub(r"\s*-\s*смотреть онлайн.*$", "", title, flags=re.I).strip()
+    pm = re.search(r'poster:\s*["\x27]([^"\x27]+)["\x27]', page)
+    thumb = pm.group(1).replace("\\/", "/") if pm else ""
+    sm = re.search(r'\bseasons:\s*\[', page)  # the site switched from "seasons:[" to "seasons: [" at some point
+    if sm:
+        seasons, _ = json.JSONDecoder().raw_decode(page[sm.end() - 1:])
         seasons = [sn for sn in seasons if not sn.get("blocked")]
         seasons.sort(key=lambda sn: _ep_num(sn["season"]))
         for sn in seasons:
@@ -977,24 +1370,34 @@ def nextembed_data(url):
             names = obj.get("names") or []
         except ValueError:
             pass
-    return title, None, {"hls": hm.group(1), "names": names}
+    names = [n for n in names if n and n.lower() != "delete"]
+    return title, None, {"hls": hm.group(1), "names": names, "thumb": thumb}
 
 def nextembed_structure(url):
     title, seasons, movie = nextembed_data(url)
     if movie:
+        thumb = movie.get("thumb") or ""
+        if not thumb or thumb.startswith("data:image"):
+            kp_m = re.search(r'(?:kp[=/]|movie/)(\d{3,8})', url)
+            if kp_m:
+                thumb = f"https://st.kp.yandex.net/images/film_iphone/iphone360_{kp_m.group(1)}.jpg"
         return {"title": title, "kind": "movie", "seasons": [],
-                "translations": [{"id": str(i), "title": nm} for i, nm in enumerate(movie["names"])]}
+                "translations": [{"id": str(i), "title": nm} for i, nm in enumerate(movie["names"])],
+                "thumb": thumb}
     out = []
     for sn in seasons:
         n = _ep_num(sn["season"])
         eps = []
         for e in sn["episodes"]:
             names = (e.get("audio") or {}).get("names") or []
+            names = [n for n in names if n and n.lower() != "delete"]
             ep_n = _ep_num(e["episode"])
             eps.append({"id": "s%02de%02d" % (n, ep_n), "title": f"Серия {e['episode']}",
                         "translations": [{"id": str(i), "title": nm} for i, nm in enumerate(names)]})
         out.append({"id": "s%02d" % n, "title": f"Сезон {n}", "episodes": eps})
-    return {"title": title, "kind": "series", "seasons": out, "translations": []}
+    kp_m = re.search(r'(?:kp[=/]|movie/)(\d{3,8})', url)
+    thumb = f"https://st.kp.yandex.net/images/film_iphone/iphone360_{kp_m.group(1)}.jpg" if kp_m else (movie.get("thumb") if movie else "")
+    return {"title": title, "kind": "series", "seasons": out, "translations": [], "thumb": thumb}
 
 def nextembed_resolve(url, episode, voice_id=None, voice_title=None):
     """Fresh HLS master URL (tokens expire) and the audio track index for the chosen episode/voice."""
@@ -1015,6 +1418,7 @@ def nextembed_resolve(url, episode, voice_id=None, voice_title=None):
             ep = (sn, sn["episodes"][0])
         sn, e = ep
         names = (e.get("audio") or {}).get("names") or []
+        names = [n for n in names if n and n.lower() != "delete"]
         hls = e["hls"]
         label = f"{title} - Сезон {_ep_num(sn['season'])}, Серия {e['episode']}"
         ep_id = "s%02de%02d" % (_ep_num(sn["season"]), _ep_num(e["episode"]))
@@ -1100,7 +1504,7 @@ def download_segments(urls, dest, headers, info, on_segment, workers=12):
                 on_segment(len(chunk))
     return written
 
-def download_nextembed(session_id, title, master_url, track, quality="720p", speed="1.0x"):
+def download_nextembed(session_id, title, master_url, track, quality="720p", speed="1.0x", referer="https://api.nextembed.ws/"):
     """Video + chosen audio track come as separate HLS streams: download both, merge, convert, cast."""
     info = active_sessions.get(session_id)
     if not info:
@@ -1108,7 +1512,7 @@ def download_nextembed(session_id, title, master_url, track, quality="720p", spe
     cancel_event = info["cancel_event"]
     vpath = os.path.join(CACHE_DIR, f"temp_{session_id}.v.ts")
     apath = os.path.join(CACHE_DIR, f"temp_{session_id}.a.ts")
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://api.nextembed.ws/"}
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": referer}
     errors = []
     try:
         if session_id == current_session_id:
@@ -1205,7 +1609,7 @@ def download_nextembed(session_id, title, master_url, track, quality="720p", spe
 _series_cache = {}
 
 def is_kinogo(url):
-    return ("kinogo" in url and not is_blocked_site(url)) or "cinemar.cc" in url
+    return ("kinogo" in url and "moy.su" not in url and "kinogo-hd" not in url and not is_blocked_site(url)) or "cinemar.cc" in url
 
 def series_episodes(url, info=None):
     """Flat ordered list of episode ids for a Kinogo series page (cached 10 min)."""
@@ -1214,7 +1618,7 @@ def series_episodes(url, info=None):
     if cached and now - cached[0] < 600:
         return cached[1]
     try:
-        info = info or (nextembed_structure(url) if is_nextembed(url) else extract_kinogo(url, mode="info") if is_kinogo(url) else rezka_structure(url))
+        info = info or (nextembed_structure(url) if is_nextembed(url) else extract_kinogo(url, mode="info") if is_kinogo(url) else seasonvar_structure(url) if is_seasonvar(url) else rezka_structure(url))
         eps = [e["id"] for sn in info.get("seasons", []) for e in sn["episodes"]]
     except Exception:
         eps = []
@@ -1223,7 +1627,10 @@ def series_episodes(url, info=None):
 
 def neighbor_episode(url, episode, delta):
     """(url, episode) of the previous/next episode, or None."""
-    if episode and (is_kinogo(url) or is_rezka(url) or is_nextembed(url)):
+    if is_local_file(url):
+        target = neighbor_local_video(url, delta)
+        return (target, None) if target else None
+    if episode and (is_kinogo(url) or is_rezka(url) or is_nextembed(url) or is_seasonvar(url)):
         eps = series_episodes(url)
         if episode in eps:
             i = eps.index(episode) + delta
@@ -1526,126 +1933,58 @@ def generate_lsm_master_playlist(lsm_data, chosen_lang=None, chosen_quality=None
 
     return "\n".join(lines) + "\n"
 
-def is_mover(url):
-    return bool(re.search(r'mover\.uz/(watch|video/embed)/', url or ""))
+_fb_cache = {}
+_fb_cache_lock = threading.Lock()
 
-def extract_mover(url, quality="720p"):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-    with urllib.request.urlopen(req, timeout=12) as r:
-        html = r.read().decode("utf-8", errors="ignore")
-    m = re.search(r'data-config="#2([^"]+)"', html)
-    if not m:
-        m_embed = re.search(r'new Playerjs\(.#2([^"\x27]+)', html)
-        if not m_embed:
-            raise Exception("Could not find mover.uz video player config")
-        payload = m_embed.group(1)
-    else:
-        payload = m.group(1)
-    clean = re.sub(r"//.{32}", "", payload)
-    clean += "=" * ((4 - len(clean) % 4) % 4)
-    cfg = json.loads(base64.b64decode(clean).decode("utf-8"))
-    title = cfg.get("title") or "Mover.uz Video"
-    file_spec = cfg.get("file", "")
-    streams = {}
-    if "[" in file_spec:
-        for q_match, u_match in re.findall(r"\[([0-9]+p)\](https?://[^\s,]+)", file_spec):
-            streams[q_match] = u_match
-    elif file_spec.startswith("http"):
-        streams["720p"] = file_spec
-    qualities = list(streams.keys()) or ["720p"]
-    qualities.sort(key=lambda x: int(re.sub(r"\D", "", x) or 0), reverse=True)
-    chosen = streams.get(quality) or (streams.get("720p") if "720p" in streams else None) or (streams[qualities[0]] if streams else file_spec)
-    return title, chosen, qualities, cfg.get("duration", 0), cfg.get("poster")
-
-def is_sportacentrs(url):
+def is_facebook(url):
     if not url:
         return False
-    u = url.lower()
-    return "sportacentrs.com" in u or "tiesraides.lv" in u
+    u = str(url).lower()
+    return bool(re.search(r'(facebook\.com|fb\.watch|fb\.com)', u))
 
-def extract_sportacentrs(url, quality="720p"):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-    with urllib.request.urlopen(req, timeout=12) as r:
-        page = r.read().decode("utf-8", errors="ignore")
+def extract_facebook(url, quality="720p"):
+    q_val = quality.replace("p", "") if quality else "720"
+    fmt = f"bv*[height<={q_val}]+ba/b[height<={q_val}]/bv*+ba/b"
+    cache_key = f"{url}|{quality}"
+    with _fb_cache_lock:
+        cached = _fb_cache.get(cache_key)
+        if cached and (time.time() - cached["ts"]) < 300:
+            return cached["data"]
 
-    m_title = (re.search(r'<meta[^>]+property=["\x27]og:title["\x27][^>]+content=["\x27]([^"\x27]+)["\x27]', page)
-               or re.search(r'<title>(.*?)</title>', page, re.DOTALL))
-    title = html.unescape(m_title.group(1).strip()) if m_title else "Sportacentrs TV"
-    title = re.sub(r'\s*&ndash;\s*Sportacentrs.*$', '', title)
-    title = re.sub(r'\s*–\s*Sportacentrs.*$', '', title)
-    title = title.strip()
+    cmd_info = YT_DLP_BASE + ["--dump-single-json", "--skip-download", url]
+    proc_info = subprocess.run(cmd_info, capture_output=True, text=True, timeout=20)
+    if proc_info.returncode != 0:
+        err = (proc_info.stderr.strip().splitlines() or ["Facebook extraction failed"])[-1]
+        raise Exception(f"Facebook extraction error: {err}")
+    data = json.loads(proc_info.stdout)
+    title = data.get("title") or "Facebook Video"
+    dur = float(data.get("duration") or 0.0)
+    thumb = data.get("thumbnail") or ""
+    is_live = bool(data.get("is_live"))
 
-    m_thumb = re.search(r'<meta[^>]+property=["\x27]og:image["\x27][^>]+content=["\x27]([^"\x27]+)["\x27]', page)
-    thumb = html.unescape(m_thumb.group(1).strip()) if m_thumb else None
-
-    if "live.tiesraides.lv" in url or "cdn.tiesraides.lv" in url:
-        embed_url = url
-        embed_html = page
-    else:
-        m_iframe = re.search(r'<iframe[^>]+src=["\x27]([^"\x27]*(?:tiesraides\.lv|sportacentrs)[^"\x27]*)["\x27]', page)
-        if m_iframe:
-            embed_url = urllib.parse.urljoin(url, html.unescape(m_iframe.group(1)))
-            req_embed = urllib.request.Request(embed_url, headers={"User-Agent": "Mozilla/5.0", "Referer": url})
-            with urllib.request.urlopen(req_embed, timeout=12) as r2:
-                embed_html = r2.read().decode("utf-8", errors="ignore")
-        else:
-            embed_url = url
-            embed_html = page
-
-    m_qual = re.search(r'this\.qualities\s*=\s*(\[\[.*?\]\]);', embed_html, re.DOTALL)
-    if m_qual:
-        try:
-            raw_matrix = ast.literal_eval(m_qual.group(1))
-        except Exception:
-            raw_matrix = json.loads(m_qual.group(1).replace("'", '"'))
-        btns = re.findall(r'class=[\"\x27][^\"\x27]*quality-button[^\"\x27]*[\"\x27][^>]*>.*?<span>(.*?)</span>', embed_html, re.DOTALL)
-        streams = {}
-        for i, u_stream in enumerate(raw_matrix[0]):
-            label = btns[i] if i < len(btns) else f"{i}"
-            m_h = re.search(r'(\d+p)', label)
-            q = m_h.group(1) if m_h else label.strip()
-            hls_u = re.sub(r'/manifest\.f4m(?:\?[^\s\'"]*)?$', '/playlist.m3u8', u_stream)
-            if hls_u.startswith("http://"):
-                hls_u = "https://" + hls_u[7:]
-            streams[q] = hls_u
-
-        qualities = list(streams.keys())
-        qualities.sort(key=lambda x: int(re.sub(r"\D", "", x) or 0), reverse=True)
-        chosen = streams.get(quality) or (streams.get("720p") if "720p" in streams else None) or (streams[qualities[0]] if streams else "")
-        return {
-            "title": title,
-            "kind": "live",
-            "is_live": True,
-            "qualities": qualities,
-            "stream_url": chosen,
-            "streams": streams,
-            "thumb": thumb,
-        }
-
-    m_srcs = re.findall(r'src:\s*[\"\x27]([^\"\x27]+)[\"\x27]', embed_html)
-    if m_srcs:
-        vod_urls = []
-        for s in m_srcs:
-            s_abs = s if s.startswith("http") else ("https:" + s if s.startswith("//") else urllib.parse.urljoin(embed_url, s))
-            vod_urls.append(s_abs)
-        if not thumb:
-            m_p = re.search(r'poster:\s*[\"\x27]([^\"\x27]+)[\"\x27]', embed_html)
-            if m_p:
-                p_url = m_p.group(1)
-                thumb = p_url if p_url.startswith("http") else ("https:" + p_url if p_url.startswith("//") else urllib.parse.urljoin(embed_url, p_url))
-        return {
-            "title": title,
-            "kind": "movie",
-            "is_live": False,
-            "qualities": ["720p"],
-            "stream_url": vod_urls[0] if vod_urls else None,
-            "urls": vod_urls,
-            "thumb": thumb,
-        }
-
-    raise Exception("Could not find playable stream on Sportacentrs / Tiesraides page")
+    cmd_url = YT_DLP_BASE + ["-f", fmt, "--get-url", url]
+    proc_url = subprocess.run(cmd_url, capture_output=True, text=True, timeout=20)
+    lines = [l.strip() for l in proc_url.stdout.strip().splitlines() if l.strip()]
+    if not lines:
+        raise Exception("Could not retrieve Facebook stream URL")
+    stream_url = lines[0]
+    kind = "dash" if (".mpd" in stream_url or "/dash/" in stream_url) else ("hls" if ".m3u8" in stream_url else "mp4")
+    res = {
+        "title": title,
+        "stream_url": stream_url,
+        "kind": kind,
+        "duration": dur,
+        "thumb": thumb,
+        "is_live": is_live,
+    }
+    with _fb_cache_lock:
+        _fb_cache[cache_key] = {"data": res, "ts": time.time()}
+    return res
 
 def inspect_url(url):
+    local_path = resolve_local_path(url)
+    if local_path:
+        return inspect_local_file(local_path)
     url = normalize_url(url)
     if is_blocked_site(url):
         raise Exception("cloudflare: page is behind a bot check")
@@ -1655,7 +1994,13 @@ def inspect_url(url):
         if data["kind"] == "series":
             series_episodes(url, info=data)
         res = {"ok": True, "title": data["title"], "kind": data["kind"], "seasons": data["seasons"],
-               "translations": data["translations"], "qualities": ["720p", "360p"], "speeds": speeds}
+               "translations": data["translations"], "qualities": ["720p", "360p"], "speeds": speeds,
+               "thumb": data.get("thumb") or ""}
+    elif is_seasonvar(url):
+        data = seasonvar_structure(url)
+        series_episodes(url, info=data)
+        res = {"ok": True, "title": data["title"], "kind": "series", "seasons": data["seasons"],
+               "translations": data["translations"], "qualities": ["1080p"], "speeds": speeds, "thumb": data["thumb"]}
     elif "kinogo" in url or "cinemar.cc" in url:
         data = extract_kinogo(url, mode="info")
         if data.get("kind") == "series":
@@ -1712,6 +2057,10 @@ def inspect_url(url):
             "duration": dur,
             "thumb": thumb,
         }
+    elif is_liveball(url):
+        data = extract_liveball(url)
+        res = {"ok": True, "title": data["title"], "kind": "live", "seasons": [], "translations": [],
+               "qualities": ["720p"], "speeds": speeds}
     elif is_sportacentrs(url):
         data = extract_sportacentrs(url)
         res = {
@@ -1723,6 +2072,19 @@ def inspect_url(url):
             "qualities": data.get("qualities", ["720p", "540p", "270p"]),
             "speeds": speeds,
             "thumb": data.get("thumb"),
+        }
+    elif is_facebook(url):
+        data = extract_facebook(url)
+        res = {
+            "ok": True,
+            "title": data["title"],
+            "kind": "live" if data.get("is_live") else "movie",
+            "seasons": [],
+            "translations": [],
+            "qualities": ["720p", "360p", "144p"],
+            "speeds": speeds,
+            "duration": data.get("duration", 0),
+            "thumb": data.get("thumb", ""),
         }
     else:
         res = {
@@ -1915,6 +2277,19 @@ def get_clean_ip(hostname):
     except Exception as e:
         print("DoH error for", hostname, e)
     return None
+
+_orig_getaddrinfo = socket.getaddrinfo
+
+def _custom_getaddrinfo(host, port, *args, **kwargs):
+    try:
+        return _orig_getaddrinfo(host, port, *args, **kwargs)
+    except socket.gaierror:
+        clean_ip = get_clean_ip(host)
+        if clean_ip:
+            return _orig_getaddrinfo(clean_ip, port, *args, **kwargs)
+        raise
+
+socket.getaddrinfo = _custom_getaddrinfo
 
 def run_tracked(cmd, procs, timeout):
     """Run a subprocess that cancel_session() can kill; returns (returncode, stdout bytes)."""
@@ -2450,26 +2825,6 @@ DL_WORKERS = 8
 DL_CHUNK = 8 * 1024 * 1024
 DL_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-def urlopen_fast(req, connect_timeout=4, read_timeout=30, attempts=3, timeout=None):
-    """urlopen that gives up on a dead address after a few seconds (servers with several A records)."""
-    if timeout is not None:
-        connect_timeout = timeout
-        read_timeout = timeout
-    last = None
-    for _ in range(attempts):
-        try:
-            r = urllib.request.urlopen(req, timeout=connect_timeout)
-            try:
-                r.fp.raw._sock.settimeout(read_timeout)
-            except Exception:
-                pass
-            return r
-        except urllib.error.HTTPError:
-            raise
-        except Exception as e:
-            last = e
-    raise last
-
 def remote_size(url):
     """Size in bytes if the server supports Range requests, else None."""
     for _ in range(3):
@@ -2636,6 +2991,49 @@ def download_dash(session_id, title, urls, speed="1.0x", audio_idx=0):
         set_error(session_id, e)
     finally:
         stop_monitor.set()
+
+def download_facebook(session_id, title, page_url, speed="1.0x", audio_idx=0, start_at=0, quality="720p"):
+    session_info = active_sessions.get(session_id)
+    if not session_info:
+        return
+    cancel_event = session_info["cancel_event"]
+    dest = os.path.join(CACHE_DIR, f"fb_{session_id}.mp4")
+    if os.path.exists(dest):
+        try:
+            os.remove(dest)
+        except Exception:
+            pass
+    if session_id == current_session_id:
+        app_state.update(status="downloading", stage="download", status_text="Загружаю Facebook видео", title=title, download_progress=0)
+    q_val = quality.replace("p", "") if quality else "720"
+    fmt = f"bv*[height<={q_val}]+ba/b[height<={q_val}]/bv*+ba/b"
+    cmd = YT_DLP_BASE + ["-f", fmt, "-o", dest, page_url]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    session_info["proc"] = proc
+    try:
+        while True:
+            if cancel_event.is_set():
+                proc.kill()
+                return
+            line = proc.stdout.readline()
+            if not line:
+                break
+            m = re.search(r'\[download\]\s+([\d\.]+)%', line)
+            if m and session_id == current_session_id:
+                try:
+                    pct = int(float(m.group(1)))
+                    app_state["download_progress"] = min(99, pct)
+                except Exception:
+                    pass
+        proc.wait()
+        if cancel_event.is_set():
+            return
+        if proc.returncode != 0:
+            raise Exception("yt-dlp download failed for Facebook video")
+        stream_local_video(session_id, title, dest, speed=speed, start_at=start_at, audio_idx=audio_idx)
+    except Exception as e:
+        session_info["active"] = False
+        set_error(session_id, e)
 
 LIVE_START_BYTES = 5 * 1024 * 1024  # start the TV once this much converted video exists
 
@@ -2963,21 +3361,317 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
             except Exception:
                 pass
 
+_drop_times = []
+
+def _die_with_parent():
+    """Linux: kill the child when the server process exits, so a restarted server leaves no orphan ffmpeg writing to the cache."""
+    try:
+        import ctypes, signal
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+def stream_dash_live(session_id, title, urls, duration=0.0, start_at=0, speed="1.0x", headers=None, fallback=None, on_drop=None):
+    """Video+audio as two inputs (YouTube DASH, HLS with a separate audio track): ffmpeg writes straight into the session
+    .ts and the TV starts after ~2 MB, instead of downloading and merging the whole file first. Speed != 1.0x transcodes.
+    If ffmpeg dies before the TV started, fallback() (the old full download) runs instead; if it dies later (network
+    drop, expired link), on_drop() restarts the cast from the TV position, at most 3 times per 10 minutes."""
+    info = active_sessions.get(session_id)
+    if not info:
+        return
+    cancel_event = info["cancel_event"]
+    proc = None
+    proxies = []
+    cast = False
+    try:
+        if session_id == current_session_id:
+            app_state.update(status="downloading", stage="download", status_text="Запускаю поток", title=title, download_progress=0)
+            if duration > 0:
+                tv_player_state["duration"] = float(duration)
+        seek = max(0, int(start_at or 0))
+        if duration > 0 and seek >= duration - 5:
+            seek = 0
+        rate = 1.0
+        if speed and speed not in ("1.0x", "1.0", "1"):
+            try:
+                rate = float(str(speed).replace("x", "").strip())
+            except ValueError:
+                rate = 1.0
+        info["stream_offset"] = float(seek)
+        info["start_at"] = float(seek)
+        info["resumed"] = True
+        sys_ff = "/usr/bin/ffmpeg"  # the bundled static ffmpeg crashes on https and is 3x slower through a proxy
+        use_sys = os.path.exists(sys_ff)
+        cmd = [sys_ff if use_sys else get_ffmpeg(), "-y", "-nostdin", "-loglevel", "error"]
+        hdr = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
+        for u in urls[:2]:
+            if use_sys:
+                cmd += ["-user_agent", DL_HEADERS["User-Agent"], "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+                if hdr:
+                    cmd += ["-headers", hdr]
+                cmd += (["-ss", str(seek)] if seek else []) + ["-i", u]
+            else:
+                httpd, purl = _start_range_proxy(u, cancel_event, lambda n: None)
+                proxies.append(httpd)
+                cmd += (["-ss", str(seek)] if seek else []) + ["-i", purl]
+        if abs(rate - 1.0) > 0.02:
+            cmd += ["-filter_complex", f"[0:v:0]setpts={round(1.0 / rate, 4)}*PTS[v];[1:a:0]atempo={rate}[a]", "-map", "[v]", "-map", "[a]",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"]
+        else:
+            cmd += ["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]
+        cmd += ["-c:a", "aac", "-ac", "2", "-b:a", "192k", "-f", "mpegts", info["file"]]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=_die_with_parent)
+        local_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
+        while proc.poll() is None:
+            if cancel_event.is_set():
+                proc.kill()
+                return
+            if not cast and os.path.exists(info["file"]) and os.path.getsize(info["file"]) >= 2 * 1024 * 1024:
+                cast = True
+                if session_id == current_session_id:
+                    app_state.update(status="downloading", stage="tv", status_text="Играет на ТВ, догружаю")
+                tv_cast_url(local_url, title)
+            time.sleep(0.2)
+        if cancel_event.is_set():
+            return
+        if proc.returncode != 0:
+            tail = proc.stderr.read().decode("utf-8", errors="ignore").strip().splitlines()[-1:] or [""]
+            raise Exception("FFmpeg failed: " + tail[0])
+        info["active"] = False
+        if not cast:
+            tv_cast_url(local_url, title)
+        if session_id == current_session_id:
+            app_state.update(status="playing", stage="tv", status_text="Играет на ТВ", download_progress=100)
+            _notify_tv_listeners()
+    except Exception as e:
+        if fallback and not cast and not cancel_event.is_set():
+            print("live remux failed, falling back to full download:", e, flush=True)
+            fallback()
+            return
+        now = time.time()
+        _drop_times[:] = [t for t in _drop_times if now - t < 600]
+        if on_drop and cast and not cancel_event.is_set() and len(_drop_times) < 3:
+            _drop_times.append(now)
+            print("live remux dropped mid-playback, restarting:", e, flush=True)
+            if session_id == current_session_id:
+                app_state.update(status="downloading", stage="download", status_text="Связь прервалась, перезапускаю…")
+            on_drop()
+            return
+        info["active"] = False
+        set_error(session_id, e)
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        for h in proxies:
+            try:
+                h.shutdown()
+                h.server_close()
+            except Exception:
+                pass
+
+def stream_nextembed_live(session_id, title, master_url, track, quality, speed, referer, start_at=0, on_drop=None):
+    """Alternative audio track of a nextembed HLS: pick the video variant + audio playlist and remux them live."""
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": referer}
+    old = lambda: download_nextembed(session_id, title, master_url, track, quality, speed, referer)
+    try:
+        variants, audios = parse_master(curl_fetch(master_url, headers, max_time=15), master_url)
+        want = int(re.sub(r"\D", "", quality) or 720)
+        below = sorted([v for v in variants if v[0] <= want], reverse=True)
+        vurl = (below[0] if below else min(variants))[1]
+        aurl = audios[track][1] if audios and track < len(audios) else audios[0][1]
+        body = curl_fetch(vurl, headers, max_time=15)
+        dur = sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", body))
+    except Exception:
+        return old()
+    stream_dash_live(session_id, title, [vurl, aurl], dur, start_at, speed, headers, fallback=old, on_drop=on_drop)
+
 def download_and_stream_mp4(session_id, title, mp4_url, speed="1.0x", audio_idx=0, start_at=0):
     stream_mp4_live(session_id, title, mp4_url, speed, audio_idx, start_at=start_at)
 
+def stream_local_video(session_id, title, resolved_path, speed="1.0x", audio_idx=0, start_at=0):
+    """Remux/transcode a local video file on the laptop into the session TS file with audio injection if needed."""
+    info = active_sessions.get(session_id)
+    if not info:
+        return
+    cancel_event = info["cancel_event"]
+    if cancel_event.is_set():
+        return
+    proc = None
+    try:
+        probed_dur, audios = probe_local_media(resolved_path)
+        if cancel_event.is_set():
+            return
+        if probed_dur > 0 and session_id == current_session_id:
+            tv_player_state["duration"] = probed_dur
+
+        rate = 1.0
+        if speed and speed not in ("1.0x", "1.0", "1"):
+            try:
+                rate = float(str(speed).replace("x", "").strip())
+            except Exception:
+                rate = 1.0
+
+        seek_sec = max(0, int(float(start_at or 0)))
+        if probed_dur > 0 and seek_sec >= probed_dur - 3:
+            seek_sec = 0
+
+        info["stream_offset"] = float(seek_sec)
+        info["start_at"] = float(seek_sec)
+        info["resumed"] = True
+
+        ff = get_ffmpeg()
+        probe_cmd = [ff, "-hide_banner", "-i", resolved_path]
+        probe_p = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="ignore")
+        m_v = re.search(r"Stream #\d+:\d+(?:\([^)]+\))?:\s*Video:\s*([a-zA-Z0-9_-]+)", probe_p.stderr)
+        v_codec = m_v.group(1).lower() if m_v else ""
+        can_copy_video = (abs(rate - 1.0) <= 0.02) and (v_codec in ("h264", "avc", "avc1"))
+
+        cmd = [ff, "-y", "-nostdin", "-loglevel", "error"]
+        if seek_sec > 0:
+            cmd += ["-ss", str(seek_sec)]
+        cmd += ["-i", resolved_path]
+
+        has_audio = bool(audios)
+        if not (0 <= audio_idx < len(audios)):
+            audio_idx = 0
+
+        if not has_audio:
+            cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+            if can_copy_video:
+                cmd += [
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "copy",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-shortest"
+                ]
+            else:
+                pts_factor = round(1.0 / rate, 4) if abs(rate - 1.0) > 0.02 else 1.0
+                cmd += [
+                    "-filter_complex", f"[0:v:0]setpts={pts_factor}*PTS[v]",
+                    "-map", "[v]", "-map", "1:a:0",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-shortest"
+                ]
+        else:
+            if abs(rate - 1.0) > 0.02:
+                pts_factor = round(1.0 / rate, 4)
+                cmd += [
+                    "-filter_complex", f"[0:v:0]setpts={pts_factor}*PTS[v];[0:a:{audio_idx}]atempo={rate}[a]",
+                    "-map", "[v]", "-map", "[a]",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-ac", "2", "-b:a", "192k",
+                ]
+            elif can_copy_video:
+                audio_codec_name = audios[audio_idx].get("codec", "").lower()
+                convert_audio = ("aac" not in audio_codec_name and "mp3" not in audio_codec_name)
+                cmd += [
+                    "-map", "0:v:0", "-map", f"0:a:{audio_idx}",
+                    "-c:v", "copy",
+                    "-c:a", "aac" if convert_audio else "copy"
+                ]
+                if convert_audio:
+                    cmd += ["-b:a", "192k"]
+            else:
+                cmd += [
+                    "-map", "0:v:0", "-map", f"0:a:{audio_idx}",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-ac", "2", "-b:a", "192k"
+                ]
+
+        cmd += ["-f", "mpegts", info["file"]]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE
+        )
+        info.setdefault("procs", set()).add(proc)
+        info["ffmpeg_proc"] = proc
+
+        local_stream_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
+        cast_triggered = False
+        start_threshold = 512 * 1024
+
+        while proc.poll() is None:
+            if cancel_event.is_set():
+                proc.kill()
+                return
+            cur_sz = os.path.getsize(info["file"]) if os.path.exists(info["file"]) else 0
+            if not cast_triggered and cur_sz >= start_threshold:
+                cast_triggered = True
+                if session_id == current_session_id:
+                    app_state.update(
+                        status="playing",
+                        stage="tv",
+                        status_text="Играет с ноутбука",
+                        download_progress=100,
+                        download_speed="Файл на ноутбуке",
+                    )
+                tv_cast_url(local_stream_url, title)
+            time.sleep(0.04)
+
+        info.get("procs", set()).discard(proc)
+        if cancel_event.is_set():
+            return
+        if proc.returncode != 0:
+            err = proc.stderr.read().decode("utf-8", errors="ignore").strip().splitlines()[-1:] or [""]
+            raise Exception("FFmpeg failed: " + err[0])
+
+        info["active"] = False
+        if not cast_triggered:
+            cast_triggered = True
+            if session_id == current_session_id:
+                app_state.update(
+                    status="playing",
+                    stage="tv",
+                    status_text="Играет с ноутбука",
+                    download_progress=100,
+                    download_speed="Файл на ноутбуке",
+                )
+            tv_cast_url(local_stream_url, title)
+        elif session_id == current_session_id:
+            app_state.update(
+                status="playing",
+                stage="tv",
+                status_text="Играет с ноутбука",
+                download_progress=100,
+            )
+            _notify_tv_listeners()
+    except Exception as e:
+        info["active"] = False
+        set_error(session_id, e)
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+
+_ytdlp_cache = {}
+
 def ytdlp_streams(url, quality):
-    """One yt-dlp call: returns (title, [direct media URLs]) preferring H.264 video + AAC audio."""
+    """(title, [direct media URLs], duration) preferring H.264 video + AAC audio; cached 20 min so seeks skip yt-dlp."""
+    hit = _ytdlp_cache.get((url, quality))
+    if hit and time.time() - hit[0] < 1200:
+        return hit[1]
+    res = _ytdlp_streams(url, quality)
+    _ytdlp_cache[(url, quality)] = (time.time(), res)
+    return res
+
+def _ytdlp_streams(url, quality):
     q = quality.replace("p", "") if quality else "720"
     fmt = (f"bv*[height<={q}][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<={q}][vcodec^=avc1]/"
            f"bv*[height<={q}]+ba/b[height<={q}]/b")
-    proc = subprocess.run(YT_DLP_BASE + ["--no-playlist", "--get-title", "-g", "-f", fmt, url],
+    proc = subprocess.run(YT_DLP_BASE + ["--no-playlist", "--print", "title", "--print", "duration", "--print", "urls", "-f", fmt, url],
                           capture_output=True, text=True, timeout=90)
     lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-    if len(lines) < 2:
+    if len(lines) < 3:
         last = (proc.stderr.strip().splitlines() or ["no output"])[-1]
         raise Exception("yt-dlp could not extract: " + last)
-    return lines[0], lines[1:3]
+    try:
+        dur = float(lines[1])
+    except ValueError:
+        dur = 0.0
+    return lines[0], lines[2:4], dur
 
 def new_session(keep_extra=(), seamless=False):
     """Cancel the running session and register a new one; returns (session_id, session_file)."""
@@ -3096,10 +3790,14 @@ def start_direct_stream(session_id, title, stream_url, headers=None, kind="mp4",
 
     if kind == "hls":
         local_proxy_url = f"http://{LOCAL_IP}:{SERVER_PORT}/direct/hls.m3u8?v={session_id}"
+    elif kind == "dash":
+        local_proxy_url = f"http://{LOCAL_IP}:{SERVER_PORT}/direct/dash.mpd?v={session_id}"
     else:
         local_proxy_url = f"http://{LOCAL_IP}:{SERVER_PORT}/direct/stream?v={session_id}"
 
     if session_id == current_session_id:
+        tv_player_state["duration"] = float(_direct_sessions.get(session_id, {}).get("duration") or 0.0)
+        tv_player_state["position"] = float(start_at or 0)
         opts = dict(app_state.get("opts") or {})
         if speed:
             opts["speed"] = speed
@@ -3131,6 +3829,8 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
         # Stop TV immediately on brand-new cast request
         tv_player_state["stream_url"] = ""
         tv_player_state["session_id"] = 0
+        tv_player_state["duration"] = 0.0
+        tv_player_state["position"] = 0.0
         tv_stop()
         if tv_player_state.get("use_custom_player", True):
             threading.Thread(target=adb_launch_tv_player, daemon=True).start()
@@ -3158,6 +3858,17 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
     ensure_media_info_cached(url)
     _notify_tv_listeners()
 
+    def recast_from_here():
+        """Restart this cast at the position the TV reached (used when a live remux dies mid-playback)."""
+        _ytdlp_cache.pop((url, quality), None)  # the cached direct links may be what died
+        at = int(float(tv_player_state.get("position") or 0))
+        threading.Thread(
+            target=handle_cast_request,
+            kwargs=dict(url=url, translation_id=translation_id, quality=quality, speed=speed, start_at=at,
+                        audio_idx=audio_idx, episode=episode, translation_title=translation_title, seamless=True),
+            daemon=True,
+        ).start()
+
     def remember(title):
         had_thumb = any(h.get("url") == url and h.get("thumb") for h in load_history())
         add_history(title, url, episode=episode, quality=quality, speed=speed, translation_id=translation_id,
@@ -3166,7 +3877,49 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             threading.Thread(target=fetch_thumb, args=(url,), daemon=True).start()
 
     try:
-        if is_blocked_site(url):
+        if is_local_file(url):
+            resolved_path = resolve_local_path(url)
+            title = os.path.basename(resolved_path)
+            probed_dur, audios = probe_local_media(resolved_path)
+            if probed_dur > 0:
+                tv_player_state["duration"] = probed_dur
+            if speed and speed != "1.0x":
+                title += f" ({speed})"
+            remember(title)
+            thumb = get_or_generate_local_thumb(resolved_path, probed_dur)
+            if thumb:
+                update_history(resolved_path, thumb=thumb)
+
+            info["local_file"] = resolved_path
+            info["start_at"] = float(start_at or 0)
+            info["stream_offset"] = float(start_at or 0)
+            info["active"] = True
+            info["resumed"] = float(start_at or 0) < 10
+            info["direct_stream"] = False
+
+            if session_id == current_session_id:
+                opts = dict(app_state.get("opts") or {})
+                if speed:
+                    opts["speed"] = speed
+                app_state.update(
+                    status="playing",
+                    stage="tv",
+                    status_text="Запуск с ноутбука…",
+                    title=title,
+                    download_progress=0,
+                    download_speed="Файл на ноутбуке",
+                    audio_tracks=audios,
+                    audio_index=audio_idx,
+                    opts=opts,
+                )
+            _notify_tv_listeners()
+            threading.Thread(
+                target=stream_local_video,
+                args=(session_id, title, resolved_path, speed, audio_idx, start_at),
+                daemon=True,
+            ).start()
+            return
+        elif is_blocked_site(url):
             raise Exception("cloudflare: page is behind a bot check")
         if is_nextembed(url):
             title, master_url, track, ep_id = nextembed_resolve(url, episode, translation_id, translation_title)
@@ -3177,10 +3930,29 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
             if speed and speed != "1.0x":
                 title += f" ({speed})"
             remember(title)
+            ref = "https://api.kinogram.best/" if ("kinogram" in url or "gidonline" in url) else "https://api.nextembed.ws/"
             if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True) and track == 0:
-                start_direct_stream(session_id, title, master_url, headers={"Referer": "https://api.nextembed.ws/"}, kind="hls", speed=speed, start_at=start_at, quality=quality)
+                start_direct_stream(session_id, title, master_url, headers={"Referer": ref}, kind="hls", speed=speed, start_at=start_at, quality=quality)
             else:
-                threading.Thread(target=download_nextembed, args=(session_id, title, master_url, track, quality, speed), daemon=True).start()
+                threading.Thread(target=stream_nextembed_live, args=(session_id, title, master_url, track, quality, speed, ref, start_at, recast_from_here), daemon=True).start()
+        elif is_seasonvar(url):
+            data = seasonvar_structure(url)
+            fmap = data["files"].get(translation_id) or next(iter(data["files"].values()))
+            episode = episode or next(iter(fmap))
+            app_state["episode"] = episode
+            stream_url = fmap.get(episode)
+            if not stream_url:
+                raise Exception("seasonvar: episode not found")
+            title = f"{data['title']} {episode}" + (f" ({translation_title})" if translation_title and translation_id not in (None, "0") else "")
+            phase(session_id, "seasonvar extracted")
+            if speed and speed != "1.0x":
+                title += f" ({speed})"
+            remember(title)
+            hdr = {"Referer": "https://seasonvar.ru/", "User-Agent": "Mozilla/5.0"}
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                start_direct_stream(session_id, title, stream_url, headers=hdr, kind="mp4", speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
         elif "kinogo" in url or "cinemar.cc" in url:
             data = extract_kinogo(url, translation_id=translation_id, quality=quality, mode="stream",
                                   episode=episode, translation_title=translation_title)
@@ -3283,6 +4055,12 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                 start_direct_stream(session_id, title, stream_url, headers={"Referer": "https://mover.uz/", "User-Agent": "Mozilla/5.0"}, kind="mp4", speed=speed, start_at=start_at, quality=quality)
             else:
                 threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
+        elif is_liveball(url):
+            data = extract_liveball(url)
+            title = data["title"]
+            phase(session_id, "liveball extracted")
+            remember(title)
+            start_direct_stream(session_id, title, data["stream_url"], headers=data["headers"], kind="hls", speed=speed, start_at=0, quality=quality)
         elif is_sportacentrs(url):
             data = extract_sportacentrs(url, quality=quality)
             title = data.get("title", "Sportacentrs TV")
@@ -3308,17 +4086,38 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                         start_direct_stream(session_id, title, stream_url, headers=dict(DL_HEADERS), kind="mp4", speed=speed, start_at=start_at, quality=quality)
                     else:
                         threading.Thread(target=download_and_stream_mp4, args=(session_id, title, stream_url, speed, audio_idx, start_at), daemon=True).start()
+        elif is_facebook(url):
+            fb_data = extract_facebook(url, quality=quality)
+            title = fb_data["title"]
+            stream_url = fb_data["stream_url"]
+            kind = fb_data["kind"]
+            dur = fb_data["duration"]
+            phase(session_id, "facebook extracted")
+            if speed and speed != "1.0x":
+                title += f" ({speed})"
+            remember(title)
+            if dur > 0:
+                tv_player_state["duration"] = float(dur)
+            if fb_data.get("thumb"):
+                update_history(url, thumb=fb_data["thumb"])
+            if tv_player_state.get("use_custom_player", True) and settings.get("direct_stream", True):
+                start_direct_stream(session_id, title, stream_url, headers={"User-Agent": "Mozilla/5.0"}, kind=kind, speed=speed, start_at=start_at, quality=quality)
+            else:
+                threading.Thread(target=download_facebook, args=(session_id, title, url, speed, audio_idx, start_at, quality), daemon=True).start()
         else:
             is_youtube = bool(re.search(r'(youtube\.com|youtu\.be)/', url))
             q_val = quality.replace("p", "") if quality else "720"
             lines = []
             proc = None
             if is_youtube:
-                title, urls = ytdlp_streams(url, quality)
+                title, urls, yt_dur = ytdlp_streams(url, quality)
                 if speed and speed != "1.0x":
                     title += f" ({speed})"
                 remember(title)
-                if len(urls) == 1 and ".m3u8" in urls[0]:
+                if len(urls) == 2:
+                    old = lambda: download_dash(session_id, title, urls, speed, audio_idx)
+                    threading.Thread(target=stream_dash_live, args=(session_id, title, urls, yt_dur, start_at, speed, None, old, recast_from_here), daemon=True).start()
+                elif len(urls) == 1 and ".m3u8" in urls[0]:
                     threading.Thread(target=download_and_stream_hls, args=(session_id, title, urls[0], None, speed, quality), daemon=True).start()
                 else:
                     threading.Thread(target=download_dash, args=(session_id, title, urls, speed, audio_idx), daemon=True).start()
@@ -3334,7 +4133,8 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
                 if speed and speed != "1.0x":
                     title += f" ({speed})"
                 remember(title)
-                threading.Thread(target=download_dash, args=(session_id, title, lines[1:3], speed, audio_idx), daemon=True).start()
+                old = lambda: download_dash(session_id, title, lines[1:3], speed, audio_idx)
+                threading.Thread(target=stream_dash_live, args=(session_id, title, lines[1:3], 0.0, start_at, speed, None, old, recast_from_here), daemon=True).start()
             elif len(lines) >= 2:
                 direct_url = lines[1]
                 title = nice_title(lines[0], direct_url)
@@ -3366,8 +4166,25 @@ def handle_cast_request(url, translation_id=None, quality="720p", speed="1.0x", 
         set_error(session_id, e)
 
 def switch_audio(index):
-    """Re-mux the already downloaded MP4 with another audio track and resume at the same position."""
+    """Re-mux the already downloaded MP4 or local file with another audio track and resume at the same position."""
     info = active_sessions.get(current_session_id)
+    url = app_state.get("url")
+    if is_local_file(url):
+        pos = int(tv_player_state.get("position") or 0)
+        speed = (app_state.get("opts") or {}).get("speed", "1.0x")
+        app_state["audio_index"] = index
+        threading.Thread(
+            target=handle_cast_request,
+            kwargs=dict(
+                url=url,
+                speed=speed,
+                start_at=pos,
+                audio_idx=index,
+                seamless=True,
+            ),
+            daemon=True,
+        ).start()
+        return True, ""
     src = info.get("src_mp4") if info else None
     if not src or not os.path.exists(src):
         return False, "Смена дорожки доступна только после загрузки файла"
@@ -3456,7 +4273,12 @@ def build_tv_state_payload():
     cdn_url = info.get("direct_url") or ""
     direct_headers = dict(info.get("direct_headers") or {})
     if is_direct and active_tv_sid:
-        direct_url = f"/direct/hls.m3u8?v={active_tv_sid}" if direct_kind == "hls" else f"/direct/stream?v={active_tv_sid}"
+        if direct_kind == "hls":
+            direct_url = f"/direct/hls.m3u8?v={active_tv_sid}"
+        elif direct_kind == "dash":
+            direct_url = f"/direct/dash.mpd?v={active_tv_sid}"
+        else:
+            direct_url = f"/direct/stream?v={active_tv_sid}"
         mp4_url = direct_url
         ts_url = direct_url
     else:
@@ -3475,7 +4297,7 @@ def build_tv_state_payload():
     if "quality" not in opts or not opts["quality"]:
         opts["quality"] = "720p"
     dur = float(tv_player_state.get("duration") or 0)
-    if dur >= 43200 or (dur == 0 and info.get("file") and not info.get("active") and os.path.exists(info["file"])):
+    if not is_direct and (dur >= 43200 or (dur == 0 and info.get("file") and not info.get("active") and os.path.exists(info["file"]))):
         probed = probe_duration(path=info.get("file") or CURRENT_FILE)
         tv_player_state["duration"] = probed if 0 < probed < 43200 else 0.0
         dur = tv_player_state["duration"]
@@ -3555,9 +4377,18 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.serve_stream(send_body=False)
         elif self.path.startswith("/direct/stream"):
             self.serve_direct_stream(send_body=False)
+        elif self.path.startswith("/local/stream"):
+            self.serve_local_stream(send_body=False)
+        elif self.path.startswith("/api/thumb/"):
+            self.serve_thumb(send_body=False)
         elif self.path.startswith("/direct/hls.m3u8") or self.path.startswith("/lsm/"):
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+        elif self.path.startswith("/direct/dash.mpd"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/dash+xml")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
         else:
@@ -3606,8 +4437,18 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.serve_stream(send_body=True)
         elif clean.startswith("/stream.mp4"):
             self.serve_stream_mp4()
+        elif clean.startswith("/local/stream"):
+            self.serve_local_stream(send_body=True)
+        elif clean.startswith("/api/thumb/"):
+            self.serve_thumb()
+        elif clean == "/api/local/browse":
+            self.serve_local_browse()
+        elif clean == "/api/local/find":
+            self.serve_local_find()
         elif clean == "/direct/hls.m3u8":
             self.serve_direct_hls()
+        elif clean == "/direct/dash.mpd":
+            self.serve_direct_dash()
         elif clean == "/direct/stream":
             self.serve_direct_stream(send_body=True)
         elif clean == "/lsm/master.m3u8":
@@ -3711,34 +4552,24 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 stream_offset = float(info.get("stream_offset") or 0)
                 if info.get("direct_stream"):
                     tv_seek(target_sec)
-                elif from_tv and url:
-                    if not info.get("active") and spd in ("1.0x", "1.0", "1") and target_sec >= stream_offset and os.path.exists(info.get("file", "")):
-                        tv_player_state["position"] = float(target_sec)
-                        _issue_tv_command("load", target={
-                            "url": tv_player_state.get("stream_url") or f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={current_session_id}",
-                            "title": app_state.get("title") or tv_player_state.get("title"),
-                            "session_id": current_session_id,
-                            "start_at": float(target_sec),
-                            "stream_offset": stream_offset,
-                            "speed": spd,
-                            "reload": True,
-                        })
-                    else:
-                        threading.Thread(
-                            target=handle_cast_request,
-                            kwargs=dict(
-                                url=url,
-                                translation_id=opts.get("translation_id"),
-                                quality=opts.get("quality", "720p"),
-                                speed=spd,
-                                start_at=target_sec,
-                                audio_idx=app_state.get("audio_index", 0),
-                                episode=app_state.get("episode"),
-                                translation_title=opts.get("translation_title"),
-                                seamless=True,
-                            ),
-                            daemon=True,
-                        ).start()
+                elif url:
+                    app_state.update(status="preparing", stage="extract", status_text="Перематываю…", download_progress=0)
+                    _notify_tv_listeners()
+                    threading.Thread(
+                        target=handle_cast_request,
+                        kwargs=dict(
+                            url=url,
+                            translation_id=opts.get("translation_id"),
+                            quality=opts.get("quality", "720p"),
+                            speed=spd,
+                            start_at=target_sec,
+                            audio_idx=app_state.get("audio_index", 0),
+                            episode=app_state.get("episode"),
+                            translation_title=opts.get("translation_title"),
+                            seamless=True,
+                        ),
+                        daemon=True,
+                    ).start()
                 else:
                     tv_seek(target_sec)
                 self.send_json({"ok": True, "position": float(target_sec)})
@@ -4316,6 +5147,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         except Exception:
             sid = current_session_id
         ds = _direct_sessions.get(sid) or _direct_sessions.get(current_session_id)
+        if ds and ds.get("local_file"):
+            return self.serve_local_stream(send_body=True)
         if not ds and not u_b64:
             self.send_error(404, "Direct HLS session not found")
             return
@@ -4330,9 +5163,56 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(502, "Upstream HLS playlist invalid or empty")
             return
         rewritten = rewrite_hls_playlist(m3u8_text, final_url, sid)
+        if "#EXTINF:" in m3u8_text:
+            try:
+                extinfs = [float(x) for x in re.findall(r'#EXTINF:([\d\.]+)', m3u8_text)]
+                tot_dur = sum(extinfs)
+                if tot_dur > 0:
+                    if ds:
+                        ds["duration"] = tot_dur
+                    if sid == current_session_id:
+                        tv_player_state["duration"] = tot_dur
+            except Exception:
+                pass
         body = rewritten.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_direct_dash(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        v_raw = query.get("v", [None])[0]
+        u_b64 = query.get("u", [None])[0]
+        try:
+            sid = int(v_raw) if v_raw else current_session_id
+        except Exception:
+            sid = current_session_id
+        ds = _direct_sessions.get(sid) or _direct_sessions.get(current_session_id)
+        if not ds and not u_b64:
+            self.send_error(404, "Direct DASH session not found")
+            return
+        target_url = _b64_decode_url(u_b64) if u_b64 else ds.get("url", "")
+        if not target_url:
+            self.send_error(404, "Missing upstream DASH URL")
+            return
+        req_headers = dict((ds or {}).get("headers") or {"User-Agent": "Mozilla/5.0"})
+        raw_mpd = curl_fetch(target_url, req_headers, max_time=10)
+        if not raw_mpd or "<MPD" not in raw_mpd:
+            self.send_error(502, "Upstream DASH manifest invalid or empty")
+            return
+        base_url = target_url.rsplit("/", 1)[0] + "/"
+        if "<BaseURL>" not in raw_mpd:
+            m = re.search(r'(<MPD[^>]*>)', raw_mpd)
+            if m:
+                idx = m.end()
+                raw_mpd = raw_mpd[:idx] + f"\n  <BaseURL>{html.escape(base_url)}</BaseURL>" + raw_mpd[idx:]
+        body = raw_mpd.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/dash+xml")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
@@ -4343,11 +5223,14 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         v_raw = query.get("v", [None])[0]
         u_b64 = query.get("u", [None])[0]
+        p_raw = query.get("p", [None])[0]
         try:
             sid = int(v_raw) if v_raw else current_session_id
         except Exception:
             sid = current_session_id
         ds = _direct_sessions.get(sid) or _direct_sessions.get(current_session_id)
+        if ds and ds.get("local_file"):
+            return self.serve_local_stream(send_body=True)
         if not ds and not u_b64:
             self.send_error(404, "Direct stream session not found")
             return
@@ -4361,7 +5244,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
         if "Range" in self.headers:
             hdrs["Range"] = self.headers["Range"]
         session_info = active_sessions.get(sid)
-        cancel_event = session_info.get("cancel_event") if session_info else threading.Event()
+        cancel_event = session_info.get("cancel_event") if (session_info and not p_raw) else threading.Event()
         try:
             req = urllib.request.Request(target_url, headers=hdrs)
             with urlopen_fast(req, connect_timeout=5, read_timeout=20) as r:
@@ -4409,6 +5292,142 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def serve_thumb(self, send_body=True):
+        clean = self.path.split("?")[0]
+        name = os.path.basename(clean)
+        path = os.path.join(CACHE_DIR, name)
+        if not os.path.isfile(path):
+            self.send_error(404)
+            return
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        if not send_body:
+            return
+        with open(path, "rb") as f:
+            self.wfile.write(f.read())
+
+    def serve_local_browse(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        dir_path = query.get("path", [None])[0]
+        data = browse_local_dir(dir_path)
+        self.send_json(data)
+
+    def serve_local_find(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        filename = query.get("name", [""])[0]
+        found = find_local_video_by_name(filename)
+        self.send_json({"ok": bool(found), "path": found or ""})
+
+    def serve_local_stream(self, send_body=True):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        v_raw = query.get("v", [None])[0]
+        p_raw = query.get("p", [None])[0]
+        try:
+            sid = int(v_raw) if v_raw else current_session_id
+        except Exception:
+            sid = current_session_id
+
+        local_path = None
+        if p_raw:
+            local_path = resolve_local_path(p_raw)
+        if not local_path:
+            ds = _direct_sessions.get(sid) or _direct_sessions.get(current_session_id) or {}
+            local_path = ds.get("local_file")
+        if not local_path:
+            sinfo = active_sessions.get(sid) or active_sessions.get(current_session_id) or {}
+            local_path = sinfo.get("local_file")
+
+        if not local_path or not os.path.isfile(local_path):
+            self.send_error(404, "Local video file not found")
+            return
+
+        file_size = os.path.getsize(local_path)
+        ext = os.path.splitext(local_path)[1].lower()
+        mime_map = {
+            ".mp4": "video/mp4",
+            ".m4v": "video/mp4",
+            ".mkv": "video/x-matroska",
+            ".webm": "video/webm",
+            ".ts": "video/mp2t",
+            ".mov": "video/quicktime",
+            ".avi": "video/x-msvideo",
+        }
+        ctype = mime_map.get(ext, "video/mp4")
+
+        range_header = self.headers.get("Range")
+        start = 0
+        end = file_size - 1
+        is_range = False
+
+        if range_header:
+            m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+            if m:
+                is_range = True
+                start = int(m.group(1))
+                if m.group(2):
+                    end = int(m.group(2))
+                if end >= file_size:
+                    end = file_size - 1
+
+        if start > end or start >= file_size:
+            self.send_error(416, "Range Not Satisfiable")
+            return
+
+        content_length = (end - start) + 1
+
+        if is_range:
+            self.send_response(206, "Partial Content")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        else:
+            self.send_response(200, "OK")
+
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        if not send_body:
+            return
+
+        session_info = active_sessions.get(sid)
+        cancel_event = session_info.get("cancel_event") if (session_info and not p_raw) else threading.Event()
+        try:
+            with open(local_path, "rb") as f:
+                f.seek(start)
+                rem = content_length
+                chunk_sz = 256 * 1024
+                while rem > 0 and not cancel_event.is_set():
+                    buf = f.read(min(chunk_sz, rem))
+                    if not buf:
+                        break
+                    self.wfile.write(buf)
+                    self.wfile.flush()
+                    rem -= len(buf)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+def check_environment():
+    """What is missing or degraded on this machine, so a broken setup shows at startup instead of on the first cast."""
+    import importlib.util
+    problems = []
+    if not os.path.exists(YT_DLP_BIN):
+        problems.append("yt-dlp not found: YouTube and generic links will not play")
+    if not os.path.exists("/usr/bin/ffmpeg"):
+        problems.append("/usr/bin/ffmpeg missing: live remux of YouTube/nextembed falls back to a slow full download (the bundled ffmpeg cannot read https)")
+    if not (shutil.which("adb") or os.path.exists(os.path.expanduser("~/.local/bin/adb"))):
+        problems.append("adb not found: the player app on the TV will not be started automatically")
+    if not (shutil.which("node") or os.path.exists(NODE_BIN)):
+        problems.append("node not found: yt-dlp YouTube extraction and kinogo/cinemar pages will fail")
+    if importlib.util.find_spec("playwright") is None or not shutil.which("google-chrome"):
+        problems.append("playwright or google-chrome missing: liveball links will not play (pip install -r requirements.txt)")
+    return problems
+
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
@@ -4418,6 +5437,8 @@ if __name__ == "__main__":
     threading.Thread(target=tracker_loop, daemon=True).start()
     server = ThreadedServer(("0.0.0.0", SERVER_PORT), TVCasterHandler)
     print(f"TV Caster Web App running on http://{LOCAL_IP}:{SERVER_PORT}")
+    for problem in check_environment():
+        print("WARNING:", problem, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
