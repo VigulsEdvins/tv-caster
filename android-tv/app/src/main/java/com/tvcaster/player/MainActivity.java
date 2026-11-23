@@ -32,6 +32,7 @@ import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.Tracks;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 
@@ -165,7 +166,12 @@ public class MainActivity extends Activity implements Player.Listener, Runnable 
         );
         surfaceView.setLayoutParams(videoParams);
 
-        exoPlayer = new ExoPlayer.Builder(this).build();
+        // Bigger buffers than the defaults (50 s max, 5 s to resume after a stall): a slow source then causes
+        // rare longer pauses instead of frequent one-second stalls.
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(30000, 120000, 2500, 12000)
+                .build();
+        exoPlayer = new ExoPlayer.Builder(this).setLoadControl(loadControl).build();
         exoPlayer.setVideoSurfaceView(surfaceView);
         exoPlayer.addListener(this);
 

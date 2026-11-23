@@ -101,7 +101,7 @@ class TestLive(unittest.TestCase):
     def _drop_run(self):
         sid = 434343
         path = os.path.join(tempfile.gettempdir(), "dl_drop.ts")
-        open(path, "wb").write(b"x" * (3 * 1024 * 1024))
+        open(path, "wb").write(b"x" * (server.LIVE_PREBUFFER + 1024))
         server.active_sessions[sid] = {"file": path, "active": True, "cancel_event": threading.Event(), "procs": set()}
         proc = mock.Mock(returncode=1, stderr=io.BytesIO(b"net down"))
         proc.poll.side_effect = [None, 1, 1]

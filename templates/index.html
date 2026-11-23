@@ -1356,6 +1356,17 @@
               <div class="chips-wrap" id="speedsChips"></div>
             </div>
 
+            <!-- Start position -->
+            <div class="switcher-row" id="startAtGroup">
+              <span class="switcher-label">Начать с</span>
+              <div class="chips-wrap" style="align-items: center;">
+                <input class="search-input-field" id="startAtInput" type="text" inputmode="numeric" placeholder="чч:мм:сс" autocomplete="off" style="padding: 6px 10px; font-size: 0.9rem; width: 110px;" />
+                <div class="chip" id="startAtResume" style="display:none"></div>
+                <div class="chip" id="startAtMiddle" style="display:none">С середины</div>
+                <div class="chip" id="startAtZero">С начала</div>
+              </div>
+            </div>
+
             <button class="btn btn-primary" id="castOptsBtn" style="margin-top: 6px;">
               ▶ Смотреть с выбранными настройками
             </button>
@@ -1479,6 +1490,29 @@
     const SPEEDS = ['0.75x', '1.0x', '1.25x', '1.5x', '2.0x'];
     const STEPS = [['extract', 'Поиск'], ['download', 'Загрузка'], ['convert', 'Конвертация'], ['tv', 'ТВ']];
 
+    let startInfo = { duration: 0, resume: 0 };
+    function parseTime(str) {
+      str = (str || '').trim();
+      if (!str) return 0;
+      const parts = str.split(':').map(x => parseInt(x, 10));
+      if (parts.some(isNaN)) return 0;
+      return parts.reduce((acc, x) => acc * 60 + x, 0);
+    }
+    function updateStartChips() {
+      const ep = seriesData && seriesData.seasons.flatMap(x => x.episodes).find(e => e.id === sel.episodeId);
+      const w = ep && ((seriesData.watched_episodes || {})[ep.id]);
+      const lw = lastWatchedData;
+      let pos = 0, dur = startInfo.duration || 0;
+      if (seriesData) { if (w) { pos = w.position || 0; dur = dur || w.duration || 0; } }
+      else if (lw) { pos = lw.position || 0; dur = dur || lw.duration || 0; }
+      startInfo.resume = pos > 10 && !(dur && pos >= dur * 0.95) ? Math.floor(pos) : 0;
+      const r = $('startAtResume'), m = $('startAtMiddle');
+      r.style.display = startInfo.resume ? '' : 'none';
+      r.textContent = 'Где остановился (' + fmt(startInfo.resume) + ')';
+      m.style.display = dur > 120 ? '' : 'none';
+      m.dataset.sec = Math.floor(dur / 2);
+    }
+    let lastWatchedData = null;
     let sel = { translationId: null, voiceTitle: null, seasonId: null, episodeId: null, quality: '720p', speed: '1.0x' };
     let seriesData = null;
     let pendingSel = null;
@@ -1617,6 +1651,7 @@
       if (active) active.scrollIntoView({ block: 'nearest' });
       const ep = season.episodes.find(e => e.id === sel.episodeId);
       renderTranslations(ep ? ep.translations : []);
+      updateStartChips();
     }
 
     // ---------- Inspect URL ----------
@@ -1632,6 +1667,9 @@
         if (data.ok) {
           if (data.title) $('detectedTitle').textContent = data.title + (data.is_local ? ' (Файл с ноутбука)' : '');
           seriesData = data.kind === 'series' ? data : null;
+          lastWatchedData = data.last_watched || null;
+          startInfo.duration = data.duration || 0;
+          $('startAtInput').value = '';
           if (seriesData && pendingSel && pendingSel.episode) {
             const sn = seriesData.seasons.find(x => x.episodes.some(e => e.id === pendingSel.episode));
             if (sn) { sel.seasonId = sn.id; sel.episodeId = pendingSel.episode; }
@@ -1656,6 +1694,7 @@
           const q = data.qualities && data.qualities.length ? data.qualities : QUALITIES;
           if (!q.includes(sel.quality)) sel.quality = q.includes('720p') ? '720p' : q[0];
           renderQualities(q);
+          updateStartChips();
         } else if (data.error) {
           toast(data.error);
         }
@@ -1694,7 +1733,8 @@
         translation_title: sel.voiceTitle,
         episode: seriesData ? sel.episodeId : null,
         quality: sel.quality,
-        speed: sel.speed
+        speed: sel.speed,
+        start_at: parseTime($('startAtInput').value)
       });
       $('optionsBox').style.display = 'none';
       lastInspected = '';
@@ -1794,17 +1834,24 @@
     }
 
     // ---------- Scrubber & Progress ----------
-    function clampToBuffer(sec) {
-      const buffered = st.buffered == null ? 100 : st.buffered;
-      if (buffered < 100 && durSec > 0) {
-        const limit = Math.max(0, durSec * buffered / 100 - 10);
-        if (sec > limit) { toast('Видео буферизовано на ' + buffered + '%, дальше перематывать пока нельзя'); return limit; }
-      }
-      return sec;
-    }
+    let seekWait = null;  // {sec, ts}: seek sent, waiting for the TV to confirm
     async function seekTo(sec) {
-      sec = clampToBuffer(Math.min(Math.max(0, sec), durSec || sec));
-      await api('/api/tv/action', { action: 'seek', target: Math.floor(sec) });
+      sec = Math.floor(Math.min(Math.max(0, sec), durSec || sec));
+      seekWait = { sec, ts: Date.now() };
+      relSec = sec;
+      $('currentTime').textContent = fmt(sec);
+      if (durSec > 0) {
+        const pct = Math.min(100, sec / durSec * 100);
+        $('seekFill').style.width = pct + '%';
+        seek.value = pct * 10;
+      }
+      toast('⏩ Перемотка на ' + fmt(sec) + '…');
+      try {
+        await api('/api/tv/action', { action: 'seek', target: sec });
+      } catch (e) {
+        seekWait = null;
+        toast('Не удалось отправить перемотку: ' + e);
+      }
       setTimeout(pollStatus, 300);
     }
     const seek = $('seek');
@@ -1895,6 +1942,13 @@
         relSec = toSec(d.rel_time);
         durSec = toSec(d.duration);
         if (durSec > 6 * 3600) durSec = 0;
+        if (seekWait) {
+          const busy = d.app_status === 'preparing' || d.app_status === 'downloading' || d.seek_pending != null;
+          if (Math.abs(relSec - seekWait.sec) <= 5) { toast('✓ Перемотано на ' + fmt(seekWait.sec)); seekWait = null; }
+          else if (busy) { seekWait.ts = Date.now(); relSec = seekWait.sec; }
+          else if (Date.now() - seekWait.ts > 20000) { toast('ТВ не подтвердил перемотку, попробуйте ещё раз'); seekWait = null; }
+          else relSec = seekWait.sec;
+        }
         if (!dragging) {
           $('currentTime').textContent = fmt(relSec);
           const pct = durSec > 0 ? Math.min(100, relSec / durSec * 100) : 0;
@@ -2473,6 +2527,9 @@
     $('castBtn').addEventListener('click', castURL);
     $('castOptsBtn').addEventListener('click', castURL);
     $('queueAddBtn').addEventListener('click', addToQueue);
+    $('startAtResume').addEventListener('click', () => { $('startAtInput').value = fmt(startInfo.resume); });
+    $('startAtMiddle').addEventListener('click', () => { $('startAtInput').value = fmt(+$('startAtMiddle').dataset.sec); });
+    $('startAtZero').addEventListener('click', () => { $('startAtInput').value = ''; });
     $('queueSeasonBtn').addEventListener('click', addSeasonToQueue);
     $('queueClearBtn').addEventListener('click', async () => { renderQueue((await api('/api/queue', { action: 'clear' })).items || []); });
     $('playPauseBtn').addEventListener('click', togglePlayPause);

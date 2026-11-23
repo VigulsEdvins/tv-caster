@@ -808,6 +808,8 @@ def tv_cast_url(stream_url, title="Media Stream"):
     tv_player_state["session_id"] = current_session_id
     tv_player_state["state"] = "PLAYING"
     tv_player_state["position"] = start_pos
+    tv_player_state["last_load_ts"] = time.time()
+    tv_player_state.pop("pending_seek", None)
     _issue_tv_command("load", target={
         "url": stream_url,
         "title": title,
@@ -2561,7 +2563,7 @@ def stream_mp4_live(session_id, title, url, speed="1.0x", audio_idx=0, start_at=
             feeder = threading.Thread(target=feed_from_cache_file, daemon=True)
             feeder.start()
 
-        start_threshold = 640 * 1024 if is_cached_locally else (1536 * 1024 if (use_proxy or abs(rate - 1.0) > 0.02) else 2 * 1024 * 1024)
+        start_threshold = 640 * 1024 if is_cached_locally else LIVE_PREBUFFER
         cast_triggered = False
         local_stream_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
         while proc.poll() is None:
@@ -2638,6 +2640,8 @@ def _die_with_parent():
     except Exception:
         pass
 
+LIVE_PREBUFFER = 12 * 1024 * 1024  # bytes ffmpeg must write before the TV starts (2 MB made the TV catch up with the file and stall)
+
 def stream_dash_live(session_id, title, urls, duration=0.0, start_at=0, speed="1.0x", headers=None, fallback=None, on_drop=None):
     """Video+audio as two inputs (YouTube DASH, HLS with a separate audio track): ffmpeg writes straight into the session
     .ts and the TV starts after ~2 MB, instead of downloading and merging the whole file first. Speed != 1.0x transcodes.
@@ -2691,11 +2695,18 @@ def stream_dash_live(session_id, title, urls, duration=0.0, start_at=0, speed="1
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=_die_with_parent)
         info["procs"].add(proc)  # cancel_session() kills it at once instead of waiting for the poll loop
         local_url = f"http://{LOCAL_IP}:{SERVER_PORT}/stream.ts?v={session_id}"
+        last_log, last_size = time.time(), 0
         while proc.poll() is None:
             if cancel_event.is_set():
                 proc.kill()
                 return
-            if not cast and os.path.exists(info["file"]) and os.path.getsize(info["file"]) >= 2 * 1024 * 1024:
+            if os.path.exists(info["file"]):
+                now = time.time()
+                if now - last_log >= 15:
+                    size = os.path.getsize(info["file"])
+                    print("live remux #%s: %.1f MB written, %.2f MB/s" % (session_id, size / 1048576, (size - last_size) / 1048576 / (now - last_log)), flush=True)
+                    last_log, last_size = now, size
+            if not cast and os.path.exists(info["file"]) and os.path.getsize(info["file"]) >= LIVE_PREBUFFER:
                 cast = True
                 if session_id == current_session_id:
                     app_state.update(status="downloading", stage="tv", status_text="Играет на ТВ, догружаю")
@@ -3838,6 +3849,14 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             if "volume" in data and data["volume"] is not None:
                 tv_player_state["volume"] = max(0, min(100, int(data["volume"])))
             tv_player_state["last_report_at"] = time.time()
+            ps = tv_player_state.get("pending_seek")
+            if ps:
+                if ps["sid"] != current_session_id or time.time() - ps["ts"] > 90:
+                    tv_player_state.pop("pending_seek", None)
+                elif tv_player_state["state"] == "PLAYING" and float(tv_player_state.get("duration") or 0) > 0:
+                    tv_player_state.pop("pending_seek", None)
+                    if abs(float(tv_player_state.get("position") or 0) - ps["target"]) > 5:
+                        tv_seek(ps["target"])
             rep_url = app_state.get("url")
             rep_ep = app_state.get("episode")
             rep_pos = float(tv_player_state.get("position") or 0)
@@ -3906,6 +3925,9 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
                 stream_offset = float(info.get("stream_offset") or 0)
                 if info.get("direct_stream"):
                     tv_seek(target_sec)
+                    # The TV may still be loading and drop the command: repeat it from /api/tv/report once it plays
+                    if time.time() - float(tv_player_state.get("last_load_ts") or 0) < 25 or float(tv_player_state.get("duration") or 0) <= 0:
+                        tv_player_state["pending_seek"] = {"target": target_sec, "sid": current_session_id, "ts": time.time()}
                 elif url:
                     app_state.update(status="preparing", stage="extract", status_text="Перематываю…", download_progress=0)
                     _notify_tv_listeners()
@@ -4211,6 +4233,7 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             "next_url": bool(load_queue() or (app_state["url"] and neighbor_episode(app_state["url"], app_state.get("episode"), 1))),
             "prev_url": bool(app_state["url"] and neighbor_episode(app_state["url"], app_state.get("episode"), -1)),
             "queue_len": len(load_queue()),
+            "seek_pending": (tv_player_state.get("pending_seek") or {}).get("target"),
             "episode": app_state.get("episode"),
             "autonext": settings["autonext"],
         }
