@@ -1369,6 +1369,19 @@
             <span id="castBtnText">Показать на ТВ</span>
           </button>
 
+          <button class="btn btn-secondary" id="queueAddBtn" title="Добавить в очередь: сыграет после текущего видео">
+            ＋ В очередь
+          </button>
+
+          <!-- Queue -->
+          <div id="queueBox" style="display:none; flex-direction: column; gap: 8px;">
+            <div style="display:flex; justify-content: space-between; align-items: center;">
+              <span class="options-title">Очередь (<span id="queueCount">0</span>)</span>
+              <button class="btn btn-secondary" id="queueClearBtn" style="min-height: 32px; padding: 4px 12px; font-size: 0.8rem;">Очистить</button>
+            </div>
+            <div id="queueList" style="display:flex; flex-direction: column; gap: 6px;"></div>
+          </div>
+
           <!-- Status / Progress Banner -->
           <div class="status-banner" id="statusBanner">
             <div class="steps-row" id="steps"></div>
@@ -1686,6 +1699,48 @@
       lastInspected = '';
     }
 
+    // ---------- Queue ----------
+    let queueShown = null;
+    function queueTitle(it) {
+      return it.title + (it.episode ? ' · ' + String(it.episode).toUpperCase() : '');
+    }
+    function renderQueue(items) {
+      $('queueBox').style.display = items.length ? 'flex' : 'none';
+      $('queueCount').textContent = items.length;
+      const small = 'min-height: 30px; padding: 2px 10px; font-size: 0.85rem;';
+      $('queueList').replaceChildren(...items.map((it, i) => {
+        const btn = (text, title, fn) => el('button', { class: 'btn btn-secondary', style: small, title, text, onclick: fn });
+        const act = async (body) => { const r = await api('/api/queue', body); renderQueue(r.items || []); return r; };
+        return el('div', { style: 'display:flex; gap:6px; align-items:center;' }, [
+          el('span', { text: (i + 1) + '.', style: 'opacity:.6; min-width: 22px;' }),
+          el('span', { text: queueTitle(it), style: 'flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;' }),
+          btn('▶', 'Включить сейчас', async () => { const r = await act({ action: 'play', id: it.id }); if (!r.ok) toast(r.error); else setTimeout(pollStatus, 400); }),
+          i > 0 ? btn('↑', 'Выше', () => act({ action: 'move', id: it.id, delta: -1 })) : null,
+          i < items.length - 1 ? btn('↓', 'Ниже', () => act({ action: 'move', id: it.id, delta: 1 })) : null,
+          btn('✕', 'Убрать', () => act({ action: 'remove', id: it.id })),
+        ]);
+      }));
+    }
+    async function loadQueue() {
+      try { renderQueue((await api('/api/queue')).items || []); } catch (e) { console.error('queue', e); }
+    }
+    async function addToQueue() {
+      const url = $('urlInput').value.trim();
+      if (!url) return;
+      if (!isLink(url)) { toast('Выберите вариант из списка или вставьте ссылку'); return; }
+      const r = await api('/api/queue', {
+        action: 'add', url,
+        title: $('detectedTitle').textContent.replace(/^Опции воспроизведения$/, '') || url,
+        translation_id: sel.translationId, translation_title: sel.voiceTitle,
+        episode: seriesData ? sel.episodeId : null, quality: sel.quality, speed: sel.speed
+      });
+      renderQueue(r.items || []);
+      toast('Добавлено в очередь');
+      $('urlInput').value = '';
+      $('optionsBox').style.display = 'none';
+      lastInspected = '';
+    }
+
     // ---------- Status Banner ----------
     function showBanner(isError, msg, meta, pct, stage, hint) {
       const b = $('statusBanner');
@@ -1855,6 +1910,7 @@
         $('nextBtn').style.display = d.next_url ? 'inline-flex' : 'none';
         $('prevBtn').style.display = d.prev_url ? 'inline-flex' : 'none';
         $('autonext').checked = Boolean(d.autonext);
+        if (d.queue_len !== queueShown) { queueShown = d.queue_len; loadQueue(); }
 
         // Live Speed & Quality Chips
         renderLiveSpeeds(d.playback_speed || '1.0x');
@@ -2398,6 +2454,8 @@
     // ---------- Event Bindings ----------
     $('castBtn').addEventListener('click', castURL);
     $('castOptsBtn').addEventListener('click', castURL);
+    $('queueAddBtn').addEventListener('click', addToQueue);
+    $('queueClearBtn').addEventListener('click', async () => { renderQueue((await api('/api/queue', { action: 'clear' })).items || []); });
     $('playPauseBtn').addEventListener('click', togglePlayPause);
     $('playerFavBtn').addEventListener('click', togglePlayerFavorite);
     $('stopBtn').addEventListener('click', () => api('/api/tv/action', { action: 'stop' }).then(pollStatus));
@@ -2464,6 +2522,7 @@
     pollStatus().then(schedulePoll);
     loadFavorites();
     loadHistory();
+    loadQueue();
   </script>
 </body>
 </html>

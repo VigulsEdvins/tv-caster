@@ -3467,8 +3467,95 @@ def switch_audio(index):
     threading.Thread(target=work, daemon=True).start()
     return True, ""
 
+QUEUE_FILE = os.path.join(BASE_DIR, "queue.json")
+queue_lock = threading.Lock()
+
+def load_queue() -> list:
+    try:
+        with open(QUEUE_FILE, "r") as f:
+            q = json.load(f)
+        return q if isinstance(q, list) else []
+    except Exception:
+        return []
+
+def _save_queue(q):
+    try:
+        tmp = QUEUE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(q, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, QUEUE_FILE)
+    except Exception:
+        pass
+
+def queue_add(items) -> list:
+    """Append items (dicts with at least `url`) to the queue; returns the new queue."""
+    with queue_lock:
+        q = load_queue()
+        for it in items:
+            url = (it.get("url") or "").strip()
+            if not url:
+                continue
+            q.append({
+                "id": "%d%03d" % (int(time.time() * 1000), len(q)),
+                "url": url,
+                "title": it.get("title") or url,
+                "episode": it.get("episode") or None,
+                "translation_id": it.get("translation_id"),
+                "translation_title": it.get("translation_title") or None,
+                "quality": it.get("quality") or "720p",
+                "speed": it.get("speed") or "1.0x",
+            })
+        _save_queue(q)
+        return q
+
+def queue_remove(item_id) -> list:
+    with queue_lock:
+        q = [i for i in load_queue() if i.get("id") != item_id]
+        _save_queue(q)
+        return q
+
+def queue_move(item_id, delta) -> list:
+    with queue_lock:
+        q = load_queue()
+        idx = next((n for n, i in enumerate(q) if i.get("id") == item_id), None)
+        if idx is not None:
+            new = max(0, min(len(q) - 1, idx + delta))
+            q.insert(new, q.pop(idx))
+            _save_queue(q)
+        return q
+
+def queue_clear() -> list:
+    with queue_lock:
+        _save_queue([])
+    return []
+
+def queue_pop(item_id=None):
+    """Remove and return the first queue item (or the one with `item_id`)."""
+    with queue_lock:
+        q = load_queue()
+        idx = 0 if item_id is None else next((n for n, i in enumerate(q) if i.get("id") == item_id), None)
+        if idx is None or idx >= len(q):
+            return None
+        item = q.pop(idx)
+        _save_queue(q)
+        return item
+
+def cast_queue_item(item_id=None):
+    """Start the first queued item (or the one with `item_id`) and drop it from the queue; returns (ok, error)."""
+    item = queue_pop(item_id)
+    if not item:
+        return False, "Очередь пуста"
+    threading.Thread(target=handle_cast_request, kwargs=dict(
+        url=item["url"], translation_id=item.get("translation_id"), quality=item.get("quality", "720p"),
+        speed=item.get("speed", "1.0x"), episode=item.get("episode"),
+        translation_title=item.get("translation_title")), daemon=True).start()
+    return True, ""
+
 def cast_neighbor(delta):
-    """Cast the previous/next episode with the current options; returns (ok, error)."""
+    """Cast the previous/next episode with the current options; returns (ok, error).
+    «Next» takes the queue first, then the next episode of the current series."""
+    if delta > 0 and load_queue():
+        return cast_queue_item()
     target = neighbor_episode(app_state["url"], app_state.get("episode"), delta)
     if not target:
         return False, "Для этой ссылки нет %s серии" % ("следующей" if delta > 0 else "предыдущей")
@@ -3503,8 +3590,8 @@ def tracker_loop():
                 if ended and not info.get("active"):
                     seen["fired"] = True
                     update_history(url, episode, position=seen["dur"], duration=seen["dur"], completed=True)
-                    if settings["autonext"] and neighbor_episode(url, episode, 1):
-                        app_state.update(status="preparing", status_text="Включаю следующую серию")
+                    if load_queue() or (settings["autonext"] and neighbor_episode(url, episode, 1)):
+                        app_state.update(status="preparing", status_text="Включаю следующее из очереди" if load_queue() else "Включаю следующую серию")
                         cast_neighbor(1)
                     else:
                         app_state.update(status="idle", status_text="Воспроизведение завершено")
@@ -3681,6 +3768,8 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True, "items": build_tv_history_payload()})
         elif clean == "/api/favorites":
             self.send_json({"ok": True, "items": build_tv_favorites_payload()})
+        elif clean == "/api/queue":
+            self.send_json({"ok": True, "items": load_queue()})
         elif clean == "/api/tvs":
             devices = list_tvs()
             self.send_json({"current": TV["ip"], "devices": [{"ip": d["ip"], "name": d["name"]} for d in devices]})
@@ -3987,6 +4076,25 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             threading.Thread(target=handle_cast_request, args=args, daemon=True).start()
             self.send_json({"ok": True, "message": "Cast initiated"})
 
+        elif clean == "/api/queue":
+            action = data.get("action", "add")
+            err = ""
+            if action == "add":
+                items = data.get("items") or [data]
+                q = queue_add(items)
+            elif action == "remove":
+                q = queue_remove(data.get("id"))
+            elif action == "move":
+                q = queue_move(data.get("id"), int(data.get("delta") or 0))
+            elif action == "clear":
+                q = queue_clear()
+            elif action == "play":
+                ok, err = cast_queue_item(data.get("id"))
+                q = load_queue()
+            else:
+                q, err = load_queue(), "Неизвестное действие"
+            self.send_json({"ok": not err, "error": err, "items": q})
+
         elif clean in ("/api/next", "/api/prev"):
             ok, err = cast_neighbor(1 if clean == "/api/next" else -1)
             self.send_json({"ok": ok, "error": err})
@@ -4100,8 +4208,9 @@ class TVCasterHandler(http.server.BaseHTTPRequestHandler):
             "tv_online": TV["online"],
             "audio_tracks": app_state["audio_tracks"],
             "audio_index": app_state["audio_index"],
-            "next_url": bool(app_state["url"] and neighbor_episode(app_state["url"], app_state.get("episode"), 1)),
+            "next_url": bool(load_queue() or (app_state["url"] and neighbor_episode(app_state["url"], app_state.get("episode"), 1))),
             "prev_url": bool(app_state["url"] and neighbor_episode(app_state["url"], app_state.get("episode"), -1)),
+            "queue_len": len(load_queue()),
             "episode": app_state.get("episode"),
             "autonext": settings["autonext"],
         }
