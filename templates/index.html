@@ -1335,6 +1335,7 @@
             <div class="switcher-row" id="episodesGroup" style="display:none">
               <span class="switcher-label">Серия</span>
               <div class="chips-wrap" id="episodesChips" style="max-height: 160px; overflow-y: auto;"></div>
+              <button class="btn btn-secondary" id="queueSeasonBtn" style="min-height: 34px; padding: 4px 12px; font-size: 0.82rem; align-self: flex-start;">＋ Весь сезон в очередь</button>
             </div>
 
             <!-- Translations -->
@@ -1739,6 +1740,23 @@
       $('urlInput').value = '';
       $('optionsBox').style.display = 'none';
       lastInspected = '';
+    }
+
+    async function addSeasonToQueue() {
+      const url = $('urlInput').value.trim();
+      const season = seriesData && seriesData.seasons.find(x => x.id === sel.seasonId);
+      if (!season || !season.episodes.length) return;
+      const title = $('detectedTitle').textContent.replace(/^Опции воспроизведения$/, '') || url;
+      const items = season.episodes.map(ep => {
+        const tr = (ep.translations || []);
+        const t = tr.find(x => x.title === sel.voiceTitle) || tr.find(x => x.id === sel.translationId) || tr[0];
+        return { url, title: title + ' · ' + season.title, episode: ep.id,
+                 translation_id: t ? t.id : sel.translationId, translation_title: t ? t.title : sel.voiceTitle,
+                 quality: sel.quality, speed: sel.speed };
+      });
+      const r = await api('/api/queue', { action: 'add', items });
+      renderQueue(r.items || []);
+      toast('В очередь добавлено серий: ' + items.length);
     }
 
     // ---------- Status Banner ----------
@@ -2455,6 +2473,7 @@
     $('castBtn').addEventListener('click', castURL);
     $('castOptsBtn').addEventListener('click', castURL);
     $('queueAddBtn').addEventListener('click', addToQueue);
+    $('queueSeasonBtn').addEventListener('click', addSeasonToQueue);
     $('queueClearBtn').addEventListener('click', async () => { renderQueue((await api('/api/queue', { action: 'clear' })).items || []); });
     $('playPauseBtn').addEventListener('click', togglePlayPause);
     $('playerFavBtn').addEventListener('click', togglePlayerFavorite);
